@@ -5,7 +5,8 @@
 // 역할:
 //   1. tcp_connect() 호출 시 → 타임스탬프를 Hash Map에 저장
 //   2. tcp_rcv_state_process() 호출 시 → 타임스탬프 꺼내서 latency 계산
-//   3. 결과(PID, IP, 포트, latency)를 Ring Buffer로 유저 공간에 전달
+//   3. tcp_retransmit_skb tracepoint → 재전송 이벤트 감지
+//   4. 결과(PID, IP, 포트, latency/재전송)를 Ring Buffer로 유저 공간에 전달
 
 #include <linux/bpf.h>
 #include <asm/ptrace.h>            // struct pt_regs 정의 (BPF_KPROBE 매크로에 필요)
@@ -36,13 +37,20 @@ struct sock {
 } __attribute__((preserve_access_index));
 
 // ─────────────────────────────────────────────
+// 이벤트 타입 구분
+// ─────────────────────────────────────────────
+#define EVENT_TYPE_CONNECT     1   // TCP 연결 latency 이벤트
+#define EVENT_TYPE_RETRANSMIT  2   // TCP 재전송 이벤트
+
+// ─────────────────────────────────────────────
 // 이벤트 구조체 - Ring Buffer로 전달할 데이터 형식
 // ─────────────────────────────────────────────
 struct event {
+    __u8  type;             // 이벤트 타입 (EVENT_TYPE_CONNECT or EVENT_TYPE_RETRANSMIT)
     __u32 pid;              // 프로세스 ID
     __u32 daddr;            // 목적지 IP
     __u16 dport;            // 목적지 포트
-    __u64 latency_us;       // TCP 연결 latency (마이크로초)
+    __u64 latency_us;       // TCP 연결 latency (마이크로초, CONNECT 이벤트에서만 유효)
     char  comm[16];         // 프로그램 이름
 };
 
@@ -53,6 +61,25 @@ struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024);
 } events SEC(".maps");
+
+// ─────────────────────────────────────────────
+// BPF Map 3: Array Map - tracepoint offset 저장
+//
+// 유저 공간(tcp_trace.c)이 format 파일을 파싱해서
+// 런타임에 offset을 이 Map에 저장하면,
+// eBPF 프로그램이 Map에서 읽어서 사용함.
+//
+// Key(index): 의미
+//   0 → family offset
+//   1 → dport  offset
+//   2 → daddr  offset
+// ─────────────────────────────────────────────
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 3);
+    __type(key,   __u32);
+    __type(value, __u32);
+} retransmit_offsets SEC(".maps");
 
 // ─────────────────────────────────────────────
 // connect_info: Hash Map 에 저장할 연결 시작 정보
@@ -152,11 +179,70 @@ int BPF_KPROBE(handle_tcp_rcv_state_process, struct sock *sk)
         return 0;
 
     // tcp_connect 시점에 저장해둔 PID/comm 사용 (인터럽트 컨텍스트라 지금은 유효하지 않음)
+    e->type       = EVENT_TYPE_CONNECT;
     e->pid        = info->pid;
     e->daddr      = BPF_CORE_READ(sk, __sk_common.skc_daddr);
     e->dport      = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
     e->latency_us = latency_us;
     __builtin_memcpy(e->comm, info->comm, sizeof(e->comm));
+
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+
+// ─────────────────────────────────────────────
+// tracepoint: tcp_retransmit_skb 호출 시 실행
+//
+// 역할: TCP 재전송 발생 시 이벤트를 Ring Buffer로 전달
+//
+// offset은 하드코딩하지 않고 retransmit_offsets Map에서 읽음
+// → 유저 공간이 시작 시 format 파일을 파싱해서 Map에 저장
+// ─────────────────────────────────────────────
+SEC("tracepoint/tcp/tcp_retransmit_skb")
+int handle_tcp_retransmit(void *ctx)
+{
+    // Map에서 offset 읽기
+    __u32 idx;
+    __u32 *off;
+
+    idx = 0;
+    off = bpf_map_lookup_elem(&retransmit_offsets, &idx);
+    if (!off) return 0;
+    __u32 off_family = *off;
+
+    idx = 1;
+    off = bpf_map_lookup_elem(&retransmit_offsets, &idx);
+    if (!off) return 0;
+    __u32 off_dport = *off;
+
+    idx = 2;
+    off = bpf_map_lookup_elem(&retransmit_offsets, &idx);
+    if (!off) return 0;
+    __u32 off_daddr = *off;
+
+    // IPv4만 처리
+    __u16 family;
+    bpf_probe_read_kernel(&family, sizeof(family), ctx + off_family);
+    if (family != 2) // AF_INET = 2
+        return 0;
+
+    __u16 dport;
+    __u8  daddr[4];
+    bpf_probe_read_kernel(&dport, sizeof(dport), ctx + off_dport);
+    bpf_probe_read_kernel(&daddr, sizeof(daddr), ctx + off_daddr);
+
+    // Ring Buffer에 이벤트 기록
+    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->type       = EVENT_TYPE_RETRANSMIT;
+    e->pid        = bpf_get_current_pid_tgid() >> 32;
+    e->daddr      = *(__u32 *)daddr;
+    e->dport      = dport;
+    e->latency_us = 0;  // 재전송 이벤트에서는 미사용
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
     bpf_ringbuf_submit(e, 0);
 

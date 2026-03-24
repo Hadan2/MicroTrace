@@ -23,24 +23,34 @@ import (
 // json:"pid" → JSON의 "pid" 키와 이 필드를 연결
 // ─────────────────────────────────────────────
 type Event struct {
+	Type      string `json:"type"`       // "connect" or "retransmit"
 	PID       uint32 `json:"pid"`
 	Comm      string `json:"comm"`
 	DAddr     string `json:"daddr"`
 	DPort     uint16 `json:"dport"`
-	LatencyUs uint64 `json:"latency_us"` // TCP 연결 latency (마이크로초)
+	LatencyUs uint64 `json:"latency_us"` // connect 이벤트에서만 유효
 }
 
 // ─────────────────────────────────────────────
 // 출력 함수 (나중에 WebSocket 전송으로 교체할 때 이 함수만 바꾸면 됨)
 // ─────────────────────────────────────────────
 func handleEvent(e Event) {
-	fmt.Printf("PID: %-6d  COMM: %-16s  ->  %s:%d  latency: %d us\n",
-		e.PID,
-		e.Comm,
-		e.DAddr,
-		e.DPort,
-		e.LatencyUs,
-	)
+	if e.Type == "retransmit" {
+		fmt.Printf("[RETRANSMIT] PID: %-6d  COMM: %-16s  ->  %s:%d\n",
+			e.PID,
+			e.Comm,
+			e.DAddr,
+			e.DPort,
+		)
+	} else {
+		fmt.Printf("[CONNECT]    PID: %-6d  COMM: %-16s  ->  %s:%d  latency: %d us\n",
+			e.PID,
+			e.Comm,
+			e.DAddr,
+			e.DPort,
+			e.LatencyUs,
+		)
+	}
 }
 
 func main() {
