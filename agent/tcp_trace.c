@@ -13,36 +13,19 @@
 #include <bpf/libbpf.h>     // libbpf API (bpf_object, ring_buffer 등)
 #include <bpf/bpf.h>        // bpf_map_update_elem()
 #include "tcp_trace.skel.h" // bpftool이 자동 생성하는 skeleton 헤더
-                            // eBPF 프로그램을 C코드에서 쉽게 다루게 해줌
-
-// ─────────────────────────────────────────────
-// 이벤트 구조체 - .bpf.c 와 동일해야 함
-// 커널에서 보낸 데이터를 이 구조체로 해석
-// ─────────────────────────────────────────────
-// 이벤트 타입 (tcp_trace.bpf.c 와 동일하게 유지)
-#define EVENT_TYPE_CONNECT     1
-#define EVENT_TYPE_RETRANSMIT  2
-
-struct event {
-    unsigned char      type;        // 이벤트 타입
-    unsigned int       pid;
-    unsigned int       daddr;
-    unsigned short     dport;
-    unsigned long long latency_us;  // TCP 연결 latency (마이크로초)
-    char               comm[16];
-};
+#include "tcp_trace_common.h" // 커널/유저 공유 타입 (struct event, EVENT_TYPE_*)
 
 // ─────────────────────────────────────────────
 // format 파일 파싱 함수
 //
-// /sys/kernel/debug/tracing/events/tcp/tcp_retransmit_skb/format 에서
-// 특정 필드의 offset 값을 읽어옴
+// /sys/kernel/debug/tracing/events/tcp/tcp_retransmit_skb/format 을
+// 한 번만 열어서 family/dport/daddr offset을 한꺼번에 추출.
 //
-// 예: parse_offset("family") → 32
+// 반환값: 0 성공, -1 실패
 // ─────────────────────────────────────────────
 #define FORMAT_PATH "/sys/kernel/debug/tracing/events/tcp/tcp_retransmit_skb/format"
 
-static int parse_offset(const char *field_name)
+static int parse_offsets(int *off_family, int *off_dport, int *off_daddr)
 {
     FILE *f = fopen(FORMAT_PATH, "r");
     if (!f) {
@@ -50,24 +33,26 @@ static int parse_offset(const char *field_name)
         return -1;
     }
 
-    char line[256];
-    char search[64];
-    // 찾을 패턴: "field:... <field_name>;" 가 포함된 줄에서 "offset:숫자" 추출
-    snprintf(search, sizeof(search), " %s;", field_name);
+    *off_family = *off_dport = *off_daddr = -1;
 
-    int offset = -1;
+    char line[256];
     while (fgets(line, sizeof(line), f)) {
-        if (strstr(line, search)) {
-            // "offset:숫자;" 패턴에서 숫자 추출
-            char *p = strstr(line, "offset:");
-            if (p)
-                sscanf(p, "offset:%d", &offset);
-            break;
-        }
+        int offset = -1;
+        char *p = strstr(line, "offset:");
+        if (!p)
+            continue;
+        sscanf(p, "offset:%d", &offset);
+
+        if      (strstr(line, " family;"))  *off_family = offset;
+        else if (strstr(line, " dport;"))   *off_dport  = offset;
+        else if (strstr(line, " daddr[4];")) *off_daddr  = offset;
     }
 
     fclose(f);
-    return offset;
+
+    if (*off_family < 0 || *off_dport < 0 || *off_daddr < 0)
+        return -1;
+    return 0;
 }
 
 // 프로그램 종료 플래그 (Ctrl+C 시 루프 탈출용)
@@ -155,32 +140,24 @@ int main(void)
     }
 
     // ── 3단계: tracepoint offset 파싱 후 Map에 저장 ──
-    // format 파일에서 런타임에 offset을 읽어서 eBPF Map에 저장
-    // → eBPF 프로그램이 하드코딩 대신 Map에서 offset을 읽어 사용
-    int off_family = parse_offset("family");
-    int off_dport  = parse_offset("dport");
-    int off_daddr  = parse_offset("daddr[4]");
-
-    if (off_family < 0 || off_dport < 0 || off_daddr < 0) {
-        fprintf(stderr, "tracepoint offset 파싱 실패 (family=%d dport=%d daddr=%d)\n",
-                off_family, off_dport, off_daddr);
+    // format 파일을 한 번만 열어서 3개 offset을 한꺼번에 파싱
+    // → eBPF 프로그램이 Map lookup 1번으로 모든 offset을 읽어 사용
+    int off_family, off_dport, off_daddr;
+    if (parse_offsets(&off_family, &off_dport, &off_daddr) < 0) {
+        fprintf(stderr, "tracepoint offset 파싱 실패\n");
         goto cleanup;
     }
 
     fprintf(stderr, "tracepoint offsets: family=%d dport=%d daddr=%d\n",
             off_family, off_dport, off_daddr);
 
-    int map_fd = bpf_map__fd(skel->maps.retransmit_offsets);
-    __u32 idx, val;
-
-    idx = 0; val = (__u32)off_family;
-    bpf_map_update_elem(map_fd, &idx, &val, BPF_ANY);
-
-    idx = 1; val = (__u32)off_dport;
-    bpf_map_update_elem(map_fd, &idx, &val, BPF_ANY);
-
-    idx = 2; val = (__u32)off_daddr;
-    bpf_map_update_elem(map_fd, &idx, &val, BPF_ANY);
+    struct retransmit_offsets_t offs = {
+        .family = (__u32)off_family,
+        .dport  = (__u32)off_dport,
+        .daddr  = (__u32)off_daddr,
+    };
+    __u32 idx = 0;
+    bpf_map_update_elem(bpf_map__fd(skel->maps.retransmit_offsets), &idx, &offs, BPF_ANY);
 
     // ── 4단계: kprobe/tracepoint 훅 연결 ──────────
     // tcp_trace_bpf__attach(): tcp_connect 함수에 kprobe 연결
@@ -210,7 +187,7 @@ int main(void)
     // Go 가 stdout 을 파싱할 때 이 메시지가 섞이면 JSON 파싱 오류 발생
     fprintf(stderr, "TCP 연결 추적 시작... (종료: Ctrl+C)\n");
 
-    // ── 5단계: 이벤트 루프 ────────────────────────
+    // ── 6단계: 이벤트 루프 ────────────────────────
     // ring_buffer__poll(): Ring Buffer에 이벤트가 있으면 handle_event 호출
     //   타임아웃 100ms 마다 한번씩 체크
     //   이벤트 없으면 그냥 대기 (CPU 낭비 없음)

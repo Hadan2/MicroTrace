@@ -14,6 +14,7 @@
 #include <bpf/bpf_tracing.h>       // BPF_KPROBE 매크로
 #include <bpf/bpf_core_read.h>     // BPF_CORE_READ - CO-RE 방식으로 구조체 필드 읽기
 #include <bpf/bpf_endian.h>        // bpf_ntohs() - 바이트 오더 변환
+#include "tcp_trace_common.h"      // 커널/유저 공유 타입 (struct event, EVENT_TYPE_*)
 
 // ─────────────────────────────────────────────
 // 커널 구조체 정의 (CO-RE용 최소 선언)
@@ -36,23 +37,7 @@ struct sock {
     struct sock_common __sk_common;
 } __attribute__((preserve_access_index));
 
-// ─────────────────────────────────────────────
-// 이벤트 타입 구분
-// ─────────────────────────────────────────────
-#define EVENT_TYPE_CONNECT     1   // TCP 연결 latency 이벤트
-#define EVENT_TYPE_RETRANSMIT  2   // TCP 재전송 이벤트
-
-// ─────────────────────────────────────────────
-// 이벤트 구조체 - Ring Buffer로 전달할 데이터 형식
-// ─────────────────────────────────────────────
-struct event {
-    __u8  type;             // 이벤트 타입 (EVENT_TYPE_CONNECT or EVENT_TYPE_RETRANSMIT)
-    __u32 pid;              // 프로세스 ID
-    __u32 daddr;            // 목적지 IP
-    __u16 dport;            // 목적지 포트
-    __u64 latency_us;       // TCP 연결 latency (마이크로초, CONNECT 이벤트에서만 유효)
-    char  comm[16];         // 프로그램 이름
-};
+// struct event, EVENT_TYPE_* → tcp_trace_common.h 참고
 
 // ─────────────────────────────────────────────
 // BPF Map 1: Ring Buffer - 커널→유저 공간 이벤트 전달
@@ -66,19 +51,17 @@ struct {
 // BPF Map 3: Array Map - tracepoint offset 저장
 //
 // 유저 공간(tcp_trace.c)이 format 파일을 파싱해서
-// 런타임에 offset을 이 Map에 저장하면,
-// eBPF 프로그램이 Map에서 읽어서 사용함.
+// 런타임에 offset 구조체를 이 Map에 저장하면,
+// eBPF 프로그램이 Map lookup 1번으로 모든 offset을 읽음.
 //
-// Key(index): 의미
-//   0 → family offset
-//   1 → dport  offset
-//   2 → daddr  offset
+// Key: 0 (항상 고정)
+// Value: struct retransmit_offsets_t
 // ─────────────────────────────────────────────
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 3);
+    __uint(max_entries, 1);
     __type(key,   __u32);
-    __type(value, __u32);
+    __type(value, struct retransmit_offsets_t);
 } retransmit_offsets SEC(".maps");
 
 // ─────────────────────────────────────────────
@@ -202,35 +185,22 @@ int BPF_KPROBE(handle_tcp_rcv_state_process, struct sock *sk)
 SEC("tracepoint/tcp/tcp_retransmit_skb")
 int handle_tcp_retransmit(void *ctx)
 {
-    // Map에서 offset 읽기
-    __u32 idx;
-    __u32 *off;
-
-    idx = 0;
-    off = bpf_map_lookup_elem(&retransmit_offsets, &idx);
-    if (!off) return 0;
-    __u32 off_family = *off;
-
-    idx = 1;
-    off = bpf_map_lookup_elem(&retransmit_offsets, &idx);
-    if (!off) return 0;
-    __u32 off_dport = *off;
-
-    idx = 2;
-    off = bpf_map_lookup_elem(&retransmit_offsets, &idx);
-    if (!off) return 0;
-    __u32 off_daddr = *off;
+    // Map lookup 1번으로 모든 offset 읽기
+    __u32 idx = 0;
+    struct retransmit_offsets_t *offs = bpf_map_lookup_elem(&retransmit_offsets, &idx);
+    if (!offs)
+        return 0;
 
     // IPv4만 처리
     __u16 family;
-    bpf_probe_read_kernel(&family, sizeof(family), ctx + off_family);
+    bpf_probe_read_kernel(&family, sizeof(family), ctx + offs->family);
     if (family != 2) // AF_INET = 2
         return 0;
 
     __u16 dport;
     __u8  daddr[4];
-    bpf_probe_read_kernel(&dport, sizeof(dport), ctx + off_dport);
-    bpf_probe_read_kernel(&daddr, sizeof(daddr), ctx + off_daddr);
+    bpf_probe_read_kernel(&dport, sizeof(dport), ctx + offs->dport);
+    bpf_probe_read_kernel(&daddr, sizeof(daddr), ctx + offs->daddr);
 
     // Ring Buffer에 이벤트 기록
     struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -241,7 +211,7 @@ int handle_tcp_retransmit(void *ctx)
     e->pid        = bpf_get_current_pid_tgid() >> 32;
     e->daddr      = *(__u32 *)daddr;
     e->dport      = dport;
-    e->latency_us = 0;  // 재전송 이벤트에서는 미사용
+    e->latency_us = 0;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
     bpf_ringbuf_submit(e, 0);
