@@ -154,10 +154,171 @@ cmd.Start()                          // 실행
 
 ---
 
+## go.mod (모듈 시스템)
+
+Go 프로젝트의 **신분증** 같은 파일. 프로젝트 이름, Go 버전, 외부 패키지 목록을 정의함.
+
+```
+module microtrace/testenv   // 이 프로젝트 이름
+go 1.22.3                   // Go 버전
+```
+
+`go build`, `go run` 실행 시 Go가 "이 폴더가 어느 프로젝트에 속하는지"를 go.mod로 판단.
+없으면 `cannot find main module` 오류 발생.
+
+비슷한 것: Python의 `requirements.txt`, Node.js의 `package.json`
+
+```bash
+go mod init microtrace/testenv  # go.mod 생성
+```
+
+---
+
+## for 문법
+
+Go는 반복문이 `for` 하나뿐. 3가지 형태:
+
+```go
+// 형태 1: 무한 루프 (다른 언어의 while(true))
+for {
+    // Ctrl+C 전까지 계속 반복
+}
+
+// 형태 2: 조건부 루프 (다른 언어의 while)
+for i < 10 {
+    // i가 10 미만일 때만 반복
+}
+
+// 형태 3: 일반 for 루프
+for i := 0; i < 10; i++ {
+    // 0~9 반복
+}
+```
+
+---
+
+## defer (지연 실행)
+
+"지금 당장 말고, 이 함수가 끝날 때 실행해줘" 라는 키워드.
+
+```go
+func main() {
+    f, _ := os.Open("file.txt")
+    defer f.Close()   // main() 끝날 때 자동으로 Close() 호출
+
+    // ... 파일 사용 ...
+}   // ← 여기서 f.Close() 자동 실행
+```
+
+파일, 네트워크 연결 등 반드시 닫아야 하는 리소스에 사용.
+
+---
+
+## HTTP 클라이언트 (net/http)
+
+```go
+// 클라이언트 생성
+client := &http.Client{
+    Transport: &http.Transport{
+        DisableKeepAlives: false,  // false = Keep-Alive 사용 (연결 재사용)
+                                   // true  = 매 요청마다 새 TCP 연결
+    },
+    Timeout: 3 * time.Second,     // 3초 안에 응답 없으면 실패 처리
+}
+
+// GET 요청
+resp, err := client.Get("http://localhost:8080/ping")
+if err != nil {
+    log.Printf("실패: %v", err)
+    return
+}
+
+// ⚠️ Body를 끝까지 읽고 닫아야 연결이 풀에 반환됨
+// 안 읽고 닫으면 연결 재사용 불가 → 매번 새 TCP 연결
+io.Copy(io.Discard, resp.Body)
+resp.Body.Close()
+```
+
+**Keep-Alive가 동작하려면 두 조건 모두 필요:**
+1. 클라이언트: `DisableKeepAlives: false` + Body 끝까지 읽기
+2. 서버: `IdleTimeout` 명시 (없으면 `ReadTimeout` 값 사용 → 짧으면 자주 끊김)
+
+---
+
+## HTTP 서버 (net/http)
+
+```go
+// 핸들러 함수 - 특정 경로로 요청이 오면 자동 호출
+func pingHandler(w http.ResponseWriter, r *http.Request) {
+    // w: 응답 쓰는 통로 (여기에 쓰면 클라이언트로 전송)
+    // r: 요청 정보 (경로, 헤더, 바디 등)
+    fmt.Fprintf(w, "pong")
+}
+
+func main() {
+    // "/ping" 경로 → pingHandler 함수 연결
+    // 등록 안 된 경로로 요청하면 자동 404 응답
+    http.HandleFunc("/ping", pingHandler)
+
+    srv := &http.Server{
+        Addr:        ":8080",
+        ReadTimeout: 5 * time.Second,   // 요청 읽기 최대 5초
+        IdleTimeout: 60 * time.Second,  // Keep-Alive 연결 유지 시간 (필수!)
+    }
+    log.Fatal(srv.ListenAndServe())
+}
+```
+
+---
+
+## io.Copy / io.Discard
+
+**`io.Copy(dst, src)`** — src에서 읽어서 dst로 복사
+
+```go
+io.Copy(파일, resp.Body)      // Body 내용을 파일에 저장
+io.Copy(os.Stdout, resp.Body) // Body 내용을 터미널에 출력
+io.Copy(io.Discard, resp.Body) // Body 내용을 버림 (읽기만 하고 저장 안 함)
+```
+
+**`io.Discard`** — 쓰레기통. 데이터를 받아서 그냥 버림.
+
+```
+resp.Body → io.Copy → io.Discard
+               ↑              ↑
+          끝까지 읽음      결과는 버림
+```
+
+HTTP 응답 Body를 사용하지 않더라도 Go 연결 풀 반환을 위해 끝까지 읽어야 할 때 사용.
+
+---
+
+## JSON 인코딩/디코딩
+
+```go
+import "encoding/json"
+
+// 구조체 → JSON (인코딩)
+type Event struct {
+    PID  uint32 `json:"pid"`   // json 태그: JSON 키 이름 지정
+    Comm string `json:"comm"`
+}
+
+e := Event{PID: 1234, Comm: "curl"}
+data, _ := json.Marshal(e)
+// → {"pid":1234,"comm":"curl"}
+
+// JSON → 구조체 (디코딩)
+var e Event
+json.Unmarshal([]byte(`{"pid":1234,"comm":"curl"}`), &e)
+// → e.PID = 1234, e.Comm = "curl"
+```
+
+---
+
 ## (추가 예정)
 
 Phase 2 진행하면서 필요한 개념 추가:
-- JSON 인코딩/디코딩
-- HTTP 서버
 - WebSocket
 - binary 패키지 (바이너리 파싱)
+- context (취소/타임아웃 전파)

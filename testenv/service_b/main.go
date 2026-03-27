@@ -24,6 +24,7 @@ func main() {
 	srv := &http.Server{
 		Addr:        ":8080",
 		ReadTimeout: 5 * time.Second,
+		IdleTimeout: 60 * time.Second, // Keep-Alive 연결 60초 유지
 	}
 	log.Fatal(srv.ListenAndServe())
 }

@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -40,6 +41,7 @@ func main() {
 		if err != nil {
 			log.Printf("[A] 요청 실패: %v", err)
 		} else {
+			io.Copy(io.Discard, resp.Body) // Body 끝까지 읽어야 연결 풀에 반환됨
 			resp.Body.Close()
 			fmt.Printf("[A] 응답: %s  걸린 시간: %v\n", resp.Status, elapsed)
 		}

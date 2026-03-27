@@ -17,10 +17,12 @@
 ---
 
 # 2. 목표
-1. **ms 단위 latency 측정**
-2. **microburst spike 탐지**
-3. **실시간 시각화**
-4. **낮은 시스템 오버헤드**
+
+1. **ms 단위 latency 측정** — TCP 연결 및 요청 단위 latency 추적
+2. **microburst spike 탐지** — 평균에 묻히는 찰나의 지연 스파이크 감지
+3. **원인 자동 추적** — spike 감지 시 커널/앱 레벨 원인을 자동으로 좁혀가는 지능형 분석
+4. **실시간 시각화** — 대시보드에서 latency spike를 실시간 그래프로 표시
+5. **낮은 시스템 오버헤드** — 운영 환경에 부담 없이 상시 투입 가능
 
 ---
 
@@ -38,111 +40,156 @@
 
 | 구성 요소 | 기술 스택 | 주요 역할 |
 | :--- | :--- | :--- |
-| **Agent (수집기)** | C/C++, eBPF, Cilium | 리눅스 커널에 훅을 주입하여 TCP 지연 및 재전송 이벤트를 낮은 오버헤드로 수집. |
-| **Collector (백엔드)** | Go (Goroutine), gRPC | 에이전트의 시계열 이벤트를 고루틴/채널로 비동기 처리 후 클라이언트로 실시간 스트리밍. |
-| **Database** | In-Memory Cache (또는 Redis) | 장기 저장 대신 단기 버퍼링 및 통계 계산을 위한 인메모리 저장소. |
-| **Dashboard (클라이언트)** | Wails (Go + React/Vue 등) | 백엔드와 IPC로 통신하는 데스크톱 프로파일러 UI. 실시간 네트워크 지연 스파이크를 시각적으로 표시. |
+| **Agent (수집기)** | C, eBPF (libbpf) | sock_ops로 소켓 단위 TCP latency/재전송 감시. spike 감지 시 kprobe/uprobe 동적 활성화. |
+| **Collector (백엔드)** | Go (Goroutine, Channel) | 에이전트 이벤트를 고루틴/채널로 비동기 처리 후 WebSocket으로 실시간 스트리밍. |
+| **Database** | In-Memory Cache | 장기 저장 대신 단기 버퍼링 및 통계 계산을 위한 인메모리 저장소. |
+| **Dashboard (클라이언트)** | Wails (Go + React/TS) | WebSocket으로 수신한 이벤트를 실시간 그래프로 시각화. |
 
 ```
-Application
-     │
-     │ (HTTP / RPC / Socket)
-     ▼
-Kernel
-     │
-     │ eBPF probe
-     ▼
-Latency Collector
-     │
-     │ stream
-     ▼
-Metrics Processor
-     │
-     ▼
-Visualization Dashboard
+[ 서비스 A ]  →  [ 서비스 B ]
+      │                │
+      └────────────────┘
+               │
+        sock_ops (소켓 단위 상시 감시)
+               │
+      latency spike 감지?
+          │         │
+         YES        NO
+          │
+     kprobe/uprobe 동적 활성화
+     (커널/앱 레벨 원인 추적)
+          │
+    [ Go Collector ]
+          │  WebSocket
+    [ Dashboard ]
 ```
 
 ---
 
-# 구성 요소
+# 5. eBPF 추적 전략
 
-### 1) eBPF Latency Collector
+## 왜 sock_ops인가?
 
-- TCP send / receive latency 추적
-- syscall trace
-- timestamp 기반 latency 측정
+기존 kprobe 방식의 한계:
 
-### 2) Metrics Processor
+```
+kprobe/tcp_connect:
+  - 새로운 TCP 연결을 맺을 때만 감지
+  - HTTP Keep-Alive로 연결을 재사용하면 이후 요청은 추적 불가
+  - 시스템 전체 모든 소켓에 훅 → 불필요한 오버헤드
+```
 
-- latency histogram 생성
-- spike detection
-- sliding window 계산
+sock_ops 방식:
 
-### 3) Visualization Dashboard
+```
+소켓 하나에 eBPF 프로그램을 attach
+  - 연결/전송/수신/재전송 등 소켓 전체 생명주기 추적
+  - cgroup 단위로 관심 있는 서비스에만 선택적으로 적용
+  - Keep-Alive 연결 위의 요청 단위 latency 측정 가능
+```
 
-- real-time latency graph
-- p50 / p95 / p99 latency
-- spike timeline
-- service-level latency overview
+## 3단계 추적 구조
+
+```
+1단계: sock_ops (상시 감시, 낮은 오버헤드)
+   └── 소켓 단위로 TCP latency, 재전송 감시
+   └── 평상시에는 이것만 동작
+
+2단계: kprobe (spike 감지 시 자동 활성화)
+   └── tcp_transmit_skb  → 패킷이 NIC 드라이버로 넘어가는 시간
+   └── finish_task_switch → CPU 스케줄링 지연 (Run-Queue Latency)
+   └── vfs_write          → 디스크 I/O 간섭 여부
+   └── "네트워크 문제인가, CPU/디스크 문제인가" 판별
+
+3단계: uprobe (커널 원인 제거 후 앱 레벨 추적)
+   └── 서비스 함수 진입/반환 시점 기록
+   └── "어느 함수에서 몇 ms를 썼는가" 추적
+   └── Go부터 지원 시작 (Go 런타임 goroutine 스케줄러 추적 포함)
+```
+
+## 경쟁 툴과의 비교
+
+| | Datadog APM | Cilium | MicroTrace |
+|---|---|---|---|
+| 추적 방식 | SDK 삽입 (코드 수정 필요) | sock_ops | sock_ops + 동적 kprobe/uprobe |
+| 오버헤드 | 높음 | 낮음 | 낮음 |
+| 원인 분석 | 앱 레벨만 | 네트워크만 | 커널 + 앱 레벨 자동 추적 |
+| 코드 수정 | 필요 | 불필요 | 불필요 |
 
 ---
 
-# 5. 핵심 구현 포인트 (Technical Highlights)
+# 6. 핵심 구현 포인트 (Technical Highlights)
 
-* **Event-based Spike Detection:** 기존 폴링 기반 모니터링이 놓치는 짧은 지연 스파이크를 eBPF 이벤트 기반으로 즉각 탐지.
-* **TCP Retransmission & Jitter Profiling:** TCP 재전송 횟수와 RTT 지연을 추적하여 네트워크 인프라 문제와 애플리케이션 병목을 구분.
-* **Low-overhead Data Path:** eBPF Ring Buffer 기반 이벤트 전달을 활용하여 커널과 유저 공간 간 데이터 전달 오버헤드를 최소화.
-* **Live Latency Visualization:** 데스크톱 기반 대시보드를 통해 네트워크 지연 스파이크를 실시간 그래프로 시각화.
+* **sock_ops 기반 소켓 단위 추적:** kprobe 대비 낮은 오버헤드로 Keep-Alive 연결 위의 요청 단위 latency 측정.
+* **동적 kprobe/uprobe 활성화:** spike 감지 시에만 커널/앱 레벨 추적을 활성화하여 평상시 오버헤드 최소화.
+* **tracepoint 동적 offset 파싱:** `/sys/kernel/debug/tracing/events/` format 파일을 런타임에 파싱하여 커널 버전 변경에 자동 대응.
+* **eBPF Ring Buffer:** 커널↔유저 공간 간 이벤트 전달 오버헝드 최소화.
+* **실시간 WebSocket 스트리밍:** Go collector가 이벤트를 WebSocket으로 대시보드에 즉시 전달.
 
 ---
 
-# 6. 테스트 및 검증 계획 (Test Plan)
+# 7. 테스트 및 검증 계획 (Test Plan)
 
 실제 프로덕션 수준의 트래픽을 모사하여 도구의 실시간 트러블슈팅 능력을 검증합니다.
 
-* **테스트 환경:** AWS EC2 인스턴스 상에 **Google Microservices Demo** 배포.
+* **로컬 테스트 환경:** `testenv/` 폴더의 service_a, service_b로 서비스 간 TCP 통신 시뮬레이션. `tc netem`으로 패킷 손실/지연 주입.
 
-  → :contentReference[oaicite:0]{index=0}
+* **클라우드 테스트 환경:** AWS EC2 인스턴스 상에 **Google Microservices Demo** 배포.
 
 * **부하 발생:** `wrk` 또는 내부 Load Generator를 이용하여 초당 수만 건의 가상 요청 생성.
 
-* **결과 검증:** 과부하 상태에서 특정 서비스 간에 발생하는 TCP retransmission 및 latency spike를 MicroTrace 대시보드가 실시간으로 감지하고 시각화하는지 확인.
+* **결과 검증:** 과부하 상태에서 특정 서비스 간에 발생하는 TCP retransmission 및 latency spike를 MicroTrace 대시보드가 실시간으로 감지하고 원인을 자동 추적하는지 확인.
 
 ---
 
-# 7. 개발 마일스톤 (Milestones)
+# 8. 개발 마일스톤 (Milestones)
 
-### Phase 1 (Agent 뼈대 구축)
+### ✅ Phase 1 — Agent 뼈대 구축 (완료)
 
-단일 리눅스 환경에서 eBPF 개발 환경 구축
-
-- TCP 지연 및 재전송 이벤트 추출
-- 커널 이벤트를 터미널 로그로 출력
-
----
-
-### Phase 2 (Go 스트리밍 서버 연동)
-
-- eBPF 모듈과 Go 애플리케이션 연동
-- 이벤트 데이터를 실시간 스트림 형태로 처리
-- WebSocket 또는 IPC 기반 데이터 전달 파이프라인 구축
+- WSL2 eBPF 개발 환경 구축
+- kprobe로 TCP 연결 latency 측정 구현
+- tracepoint로 TCP 재전송 감지 구현 (동적 offset 파싱)
+- Go collector와 연동하여 JSON 이벤트 스트리밍
+- testenv로 Keep-Alive 한계 확인 → sock_ops 전환 결정
 
 ---
 
-### Phase 3 (클라우드 테스트 및 시각화)
+### Phase 2 — sock_ops 전환 + 실시간 스트리밍
 
-- EC2 환경에서 마이크로서비스 테스트 환경 구성
-- 부하 테스트 수행
-- 대시보드에서 latency spike 시각화 확인
+- kprobe → sock_ops 방식으로 전환
+  - 소켓 단위 TCP latency 측정
+  - Keep-Alive 연결 위의 요청 단위 추적
+  - cgroup 기반 서비스 선택적 적용
+- Go collector에 WebSocket 서버 추가
+- agent → collector 통신: 바이너리 직렬화로 교체 (현재 JSON 임시)
 
 ---
 
-# 8. 확장 가능성
+### Phase 3 — 동적 kprobe 활성화 + 대시보드
 
-향후 확장 기능
+- spike 감지 시 kprobe 자동 활성화
+  - tcp_transmit_skb, finish_task_switch, vfs_write
+  - 커널 레벨 원인 후보 자동 판별
+- Wails + React 대시보드 구현
+  - 실시간 latency 그래프
+  - p50 / p95 / p99 latency
+  - spike timeline + 원인 표시
 
-- anomaly detection
-- latency spike root cause analysis
-- Kubernetes integration
-- cloud deployment
+---
+
+### Phase 4 — uprobe + 클라우드 검증 (장기)
+
+- uprobe 언어별 지원 (Go 런타임부터 시작)
+  - goroutine 스케줄링 지연 추적
+  - 함수 단위 실행 시간 측정
+- EC2 + Google Microservices Demo 배포
+- wrk 부하 테스트 및 spike 원인 자동 추적 검증
+
+---
+
+# 9. 확장 가능성
+
+- anomaly detection (ML 기반 이상 패턴 탐지)
+- Kubernetes integration (Pod/Service 단위 추적)
 - UDP 패킷 드롭 분석 지원
+- cloud deployment
