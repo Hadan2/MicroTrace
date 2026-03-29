@@ -3,44 +3,27 @@
 // tcp_trace.bpf.c - 커널 공간에서 실행되는 eBPF 프로그램
 //
 // 역할:
-//   1. tcp_connect() 호출 시 → 타임스탬프를 Hash Map에 저장
-//   2. tcp_rcv_state_process() 호출 시 → 타임스탬프 꺼내서 latency 계산
-//   3. tcp_retransmit_skb tracepoint → 재전송 이벤트 감지
-//   4. 결과(PID, IP, 포트, latency/재전송)를 Ring Buffer로 유저 공간에 전달
+//   1. sock_ops: cgroup에 attach해서 소켓 단위로 TCP 이벤트를 감시
+//   2. TCP 연결 수립 완료 시 RTT 측정, Keep-Alive 요청마다 RTT 갱신, 재전송 감지
+//   3. 결과(로컬포트, IP, 포트, RTT/재전송)를 Ring Buffer로 유저 공간에 전달
 
 #include <linux/bpf.h>
-#include <asm/ptrace.h>            // struct pt_regs 정의 (BPF_KPROBE 매크로에 필요)
-#include <bpf/bpf_helpers.h>       // bpf_get_current_pid_tgid(), bpf_ktime_get_ns() 등
-#include <bpf/bpf_tracing.h>       // BPF_KPROBE 매크로
-#include <bpf/bpf_core_read.h>     // BPF_CORE_READ - CO-RE 방식으로 구조체 필드 읽기
-#include <bpf/bpf_endian.h>        // bpf_ntohs() - 바이트 오더 변환
-#include "tcp_trace_common.h"      // 커널/유저 공유 타입 (struct event, EVENT_TYPE_*)
+#include <bpf/bpf_helpers.h>  // sock_ops 허용 헬퍼
+#include <bpf/bpf_endian.h>   // bpf_ntohs() - 바이트 오더 변환
+#include "tcp_trace_common.h" // 커널/유저 공유 타입 (struct event, EVENT_TYPE_*)
+
+// sock_ops 프로그램 타입은 사용 가능한 헬퍼 함수가 제한됨.
+// bpf_get_current_pid_tgid(), bpf_get_current_comm() 은 사용 불가.
+// → pid/comm 대신 skops->local_port 로 소켓을 식별함.
+//   local_port는 소켓마다 고유한 값으로, 유저 공간에서 /proc/net/tcp 를 통해
+//   포트 → PID/프로세스명을 역추적할 수 있음. (향후 구현)
 
 // ─────────────────────────────────────────────
-// 커널 구조체 정의 (CO-RE용 최소 선언)
-// ─────────────────────────────────────────────
-
-struct sock_common {
-    union {
-        struct {
-            __be32 skc_daddr;
-            __be32 skc_rcv_saddr;
-        };
-    };
-    __be16 skc_dport;
-    __u16  skc_num;
-    __u16  skc_family;
-    volatile unsigned char skc_state;   // TCP 상태 (TCP_SYN_SENT=2 등)
-} __attribute__((preserve_access_index));
-
-struct sock {
-    struct sock_common __sk_common;
-} __attribute__((preserve_access_index));
-
-// struct event, EVENT_TYPE_* → tcp_trace_common.h 참고
-
-// ─────────────────────────────────────────────
-// BPF Map 1: Ring Buffer - 커널→유저 공간 이벤트 전달
+// BPF Map: Ring Buffer - 커널→유저 공간 이벤트 전달
+//
+// 커널에서 발생한 이벤트를 유저 공간으로 스트리밍하는 통로.
+// bpf_ringbuf_reserve() 로 공간 예약 → 데이터 채움 → bpf_ringbuf_submit() 으로 전송.
+// 유저 공간은 ring_buffer__poll() 로 이벤트 도착을 감지.
 // ─────────────────────────────────────────────
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -48,175 +31,123 @@ struct {
 } events SEC(".maps");
 
 // ─────────────────────────────────────────────
-// BPF Map 3: Array Map - tracepoint offset 저장
+// 이벤트 채우기 헬퍼
 //
-// 유저 공간(tcp_trace.c)이 format 파일을 파싱해서
-// 런타임에 offset 구조체를 이 Map에 저장하면,
-// eBPF 프로그램이 Map lookup 1번으로 모든 offset을 읽음.
-//
-// Key: 0 (항상 고정)
-// Value: struct retransmit_offsets_t
+// CONNECT, RTT, RETRANSMIT 세 케이스가 공통으로 쓰는 필드 채우기를
+// 인라인 함수로 분리. 코드 중복 제거.
 // ─────────────────────────────────────────────
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key,   __u32);
-    __type(value, struct retransmit_offsets_t);
-} retransmit_offsets SEC(".maps");
-
-// ─────────────────────────────────────────────
-// connect_info: Hash Map 에 저장할 연결 시작 정보
-//
-// tcp_connect 시점(curl 컨텍스트)에서 PID/comm/ts 를 같이 저장.
-// tcp_rcv_state_process 는 인터럽트 컨텍스트라 PID를 읽을 수 없으므로
-// 여기서 미리 저장해둔 값을 꺼내 씀.
-// ─────────────────────────────────────────────
-struct connect_info {
-    __u64 ts;       // 연결 시작 타임스탬프 (나노초)
-    __u32 pid;      // tcp_connect 시점의 PID
-    char  comm[16]; // tcp_connect 시점의 프로그램 이름
-};
-
-// ─────────────────────────────────────────────
-// BPF Map 2: Hash Map - 두 kprobe 사이 연결 정보 임시 저장
-//
-// Key:   __u64 (소켓 포인터 주소) ← 같은 TCP 연결을 식별하는 고유값
-// Value: struct connect_info      ← 타임스탬프 + PID + comm
-//
-// max_entries: 동시에 추적할 수 있는 최대 TCP 연결 수
-// ─────────────────────────────────────────────
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
-    __type(key,   __u64);
-    __type(value, struct connect_info);
-} connect_start SEC(".maps");
-
-// ─────────────────────────────────────────────
-// kprobe 1: tcp_connect 호출 시 실행
-//
-// 역할: 연결 시작 타임스탬프를 Hash Map에 저장
-// ─────────────────────────────────────────────
-SEC("kprobe/tcp_connect")
-int BPF_KPROBE(handle_tcp_connect, struct sock *sk)
+static __always_inline void fill_event(struct event *e, struct bpf_sock_ops *skops,
+                                       __u8 type, __u64 latency_us)
 {
-    // IPv4만 처리
-    __u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
-    if (family != 2) // AF_INET = 2
-        return 0;
-
-    // 연결 시작 정보 수집 (이 시점은 curl 컨텍스트 → PID/comm 유효)
-    struct connect_info info = {};
-    info.ts  = bpf_ktime_get_ns();
-    info.pid = bpf_get_current_pid_tgid() >> 32;
-    bpf_get_current_comm(&info.comm, sizeof(info.comm));
-
-    // 소켓 포인터를 Key로 사용
-    // (__u64)sk: 포인터를 정수로 변환해서 Map의 Key로 사용
-    __u64 key = (__u64)sk;
-
-    // Hash Map에 저장: connect_start[sk주소] = {ts, pid, comm}
-    bpf_map_update_elem(&connect_start, &key, &info, BPF_ANY);
-
-    return 0;
-}
-
-// ─────────────────────────────────────────────
-// kprobe 2: tcp_rcv_state_process 호출 시 실행
-//
-// 역할: SYN-ACK 수신 시점에 타임스탬프를 꺼내 latency 계산
-//
-// tcp_rcv_state_process 는 TCP 상태머신을 처리하는 커널 함수.
-// SYN_SENT 상태에서 SYN-ACK 를 받으면 이 함수가 호출됨.
-// ─────────────────────────────────────────────
-SEC("kprobe/tcp_rcv_state_process")
-int BPF_KPROBE(handle_tcp_rcv_state_process, struct sock *sk)
-{
-    // SYN_SENT(=2) 상태인 소켓만 처리
-    // SYN_SENT: tcp_connect() 후 SYN-ACK 를 기다리는 상태
-    // 이 상태에서 tcp_rcv_state_process 가 불리면 = SYN-ACK 도착
-    __u8 sk_state = BPF_CORE_READ(sk, __sk_common.skc_state);
-    if (sk_state != 2) // TCP_SYN_SENT = 2
-        return 0;
-
-    // Hash Map에서 연결 시작 정보 꺼내기
-    __u64 key = (__u64)sk;
-    struct connect_info *info = bpf_map_lookup_elem(&connect_start, &key);
-    if (!info)
-        return 0; // 저장된 정보 없으면 종료
-
-    // latency 계산 (나노초 → 마이크로초)
-    __u64 latency_us = (bpf_ktime_get_ns() - info->ts) / 1000;
-
-    // Hash Map에서 삭제 (메모리 누수 방지)
-    bpf_map_delete_elem(&connect_start, &key);
-
-    // IPv4만 처리
-    __u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
-    if (family != 2)
-        return 0;
-
-    // Ring Buffer에 이벤트 기록
-    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    // tcp_connect 시점에 저장해둔 PID/comm 사용 (인터럽트 컨텍스트라 지금은 유효하지 않음)
-    e->type       = EVENT_TYPE_CONNECT;
-    e->pid        = info->pid;
-    e->daddr      = BPF_CORE_READ(sk, __sk_common.skc_daddr);
-    e->dport      = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+    e->type       = type;
+    // sock_ops는 pid 접근 불가 → local_port로 소켓 식별
+    // local_port: 호스트 바이트 오더로 저장됨 (변환 불필요)
+    e->pid        = skops->local_port;
+    e->daddr      = skops->remote_ip4;
+    // remote_port: (port << 16) 형태로 저장됨 (big-endian 상위 16비트)
+    // >> 16 으로 포트를 하위 16비트로 내린 뒤, bpf_ntohs()로 바이트 오더 변환
+    e->dport      = bpf_ntohs(skops->remote_port >> 16);
     e->latency_us = latency_us;
-    __builtin_memcpy(e->comm, info->comm, sizeof(e->comm));
-
-    bpf_ringbuf_submit(e, 0);
-
-    return 0;
+    __builtin_memset(e->comm, 0, sizeof(e->comm)); // comm 접근 불가
 }
 
 // ─────────────────────────────────────────────
-// tracepoint: tcp_retransmit_skb 호출 시 실행
+// sock_ops 프로그램
 //
-// 역할: TCP 재전송 발생 시 이벤트를 Ring Buffer로 전달
+// SEC("sockops"):
+//   tcp_trace.c 에서 bpf_prog_attach(prog_fd, cgroup_fd, BPF_CGROUP_SOCK_OPS, 0) 로
+//   특정 cgroup에 attach됨. 이후 그 cgroup 소속 소켓에서 TCP 이벤트가 발생할 때마다
+//   커널이 이 함수를 직접 호출함. 어떤 이벤트인지는 skops->op 로 구분.
 //
-// offset은 하드코딩하지 않고 retransmit_offsets Map에서 읽음
-// → 유저 공간이 시작 시 format 파일을 파싱해서 Map에 저장
+// 인자: struct bpf_sock_ops *skops
+//   커널이 이벤트 발생 시 직접 채워서 넘겨주는 구조체.
+//   목적지 IP(remote_ip4), 포트(remote_port), RTT(srtt_us) 등을
+//   skops->필드 로 바로 읽을 수 있음.
+//
+// 반환값: 1 (sock_ops 프로그램의 정상 처리 완료를 의미)
 // ─────────────────────────────────────────────
-SEC("tracepoint/tcp/tcp_retransmit_skb")
-int handle_tcp_retransmit(void *ctx)
+SEC("sockops")
+int handle_sock_ops(struct bpf_sock_ops *skops)
 {
-    // Map lookup 1번으로 모든 offset 읽기
-    __u32 idx = 0;
-    struct retransmit_offsets_t *offs = bpf_map_lookup_elem(&retransmit_offsets, &idx);
-    if (!offs)
-        return 0;
+    // IPv4 소켓만 처리
+    // skops->family: 소켓 주소 체계 (AF_INET=2, AF_INET6=10)
+    if (skops->family != 2) // AF_INET = 2
+        return 1;
 
-    // IPv4만 처리
-    __u16 family;
-    bpf_probe_read_kernel(&family, sizeof(family), ctx + offs->family);
-    if (family != 2) // AF_INET = 2
-        return 0;
+    switch (skops->op) {
 
-    __u16 dport;
-    __u8  daddr[4];
-    bpf_probe_read_kernel(&dport, sizeof(dport), ctx + offs->dport);
-    bpf_probe_read_kernel(&daddr, sizeof(daddr), ctx + offs->daddr);
+    // ── 이벤트 1: TCP 연결 수립 완료 (Active 측) ──────────────
+    //
+    // BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB:
+    //   connect()를 건 쪽(클라이언트)에서 3-way handshake가 끝나
+    //   ESTABLISHED 상태가 된 직후 딱 한 번 호출됨.
+    //   Keep-Alive로 연결이 재사용될 때는 호출되지 않음.
+    case BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB: {
+        // 이 소켓에서 RTT_CB를 활성화
+        // 기본적으로 RTT_CB는 꺼져 있음 → 여기서 켜야 이후 요청마다 RTT_CB가 발생함
+        // BPF_SOCK_OPS_RTT_CB_FLAG: "이 소켓에서 RTT 갱신 시마다 콜백 호출" 플래그
+        bpf_sock_ops_cb_flags_set(skops, skops->bpf_sock_ops_cb_flags | BPF_SOCK_OPS_RTT_CB_FLAG);
 
-    // Ring Buffer에 이벤트 기록
-    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        return 0;
+        // skops->srtt_us: 커널이 handshake로 측정한 Smoothed RTT
+        //   커널 내부에서 마이크로초 × 8 (고정소수점) 로 저장됨
+        //   실제 마이크로초 = srtt_us >> 3 (오른쪽 3비트 shift = ÷8)
+        __u64 rtt_us = skops->srtt_us >> 3;
 
-    e->type       = EVENT_TYPE_RETRANSMIT;
-    e->pid        = bpf_get_current_pid_tgid() >> 32;
-    e->daddr      = *(__u32 *)daddr;
-    e->dport      = dport;
-    e->latency_us = 0;
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+        struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+        if (!e)
+            return 1;
 
-    bpf_ringbuf_submit(e, 0);
+        fill_event(e, skops, EVENT_TYPE_CONNECT, rtt_us);
+        bpf_ringbuf_submit(e, 0);
+        break;
+    }
 
-    return 0;
+    // ── 이벤트 2: RTT 갱신 ────────────────────────────────────
+    //
+    // BPF_SOCK_OPS_RTT_CB:
+    //   Keep-Alive 연결 위에서 ACK가 돌아올 때마다 커널이 RTT를 재계산하고
+    //   이 콜백을 호출함. 즉 HTTP 요청 하나가 완료될 때마다 발생.
+    //
+    //   이 이벤트 덕분에 Keep-Alive 연결에서도 요청 단위 RTT 추적이 가능함.
+    //   단, 기본적으로 비활성화 상태 → 소켓에 명시적으로 활성화해야 함.
+    //
+    //   활성화 방법:
+    //   BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB 시점에 아래 플래그를 세팅:
+    //     bpf_sock_ops_cb_flags_set(skops, BPF_SOCK_OPS_RTT_CB_FLAG)
+    //   이렇게 하면 이후 이 소켓에서 RTT_CB 가 발생하기 시작함.
+    case BPF_SOCK_OPS_RTT_CB: {
+        __u64 rtt_us = skops->srtt_us >> 3;
+
+        struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+        if (!e)
+            return 1;
+
+        // EVENT_TYPE_RTT: Keep-Alive 연결 위의 요청 단위 RTT
+        fill_event(e, skops, EVENT_TYPE_RTT, rtt_us);
+        bpf_ringbuf_submit(e, 0);
+        break;
+    }
+
+    // ── 이벤트 3: TCP 재전송 발생 ──────────────────────────────
+    //
+    // BPF_SOCK_OPS_RETRANS_CB:
+    //   attach된 소켓에서 패킷 재전송이 발생할 때마다 호출됨.
+    case BPF_SOCK_OPS_RETRANS_CB: {
+        struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+        if (!e)
+            return 1;
+
+        fill_event(e, skops, EVENT_TYPE_RETRANSMIT, 0);
+        bpf_ringbuf_submit(e, 0);
+        break;
+    }
+
+    // 그 외 이벤트 (연결 종료, Passive 연결, 타임아웃 등)는 무시
+    default:
+        break;
+    }
+
+    return 1;
 }
 
 // eBPF 프로그램의 라이선스 선언 (필수)

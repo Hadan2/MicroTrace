@@ -314,3 +314,139 @@ CO-RE 있이:
 
 MicroTrace는 CO-RE 방식을 사용 → WSL2, EC2, 다양한 환경에서 재컴파일 없이 배포 가능.
 
+---
+
+## sock_ops - 소켓 단위 추적 (Phase 2 핵심)
+
+### ① 이게 뭔지
+
+소켓 하나의 **전체 생명주기** 동안 발생하는 이벤트에 eBPF 프로그램을 붙이는 방법.
+
+kprobe가 "특정 커널 함수"에 훅을 거는 것과 달리,
+sock_ops는 "특정 소켓"에 훅을 걸어서 그 소켓에서 일어나는 모든 TCP 이벤트를 추적함.
+
+```c
+SEC("sockops")
+int handle_sock_ops(struct bpf_sock_ops *skops) {
+    switch (skops->op) {
+        case BPF_SOCK_OPS_TCP_CONNECT_CB:    // 연결 시작
+        case BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB:  // 연결 수립 완료
+        case BPF_SOCK_OPS_RETRANS_CB:        // 재전송 발생
+        case BPF_SOCK_OPS_RTT_CB:            // RTT 측정값 업데이트
+        ...
+    }
+}
+```
+
+---
+
+### ② 왜 필요한가 (kprobe의 한계)
+
+현재 MicroTrace의 kprobe 방식으로는 이런 상황을 추적 못 함:
+
+```
+service_a ──────────────────────── service_b
+    │                                  │
+    │  1번째 요청: TCP 연결 수립        │
+    │  → [CONNECT] 이벤트 ✅ 감지       │
+    │                                  │
+    │  ┌── Keep-Alive 연결 유지 ──────┐ │
+    │  │  2번째 요청: 기존 연결 재사용 │ │
+    │  │  → CONNECT 없음 → 감지 ❌    │ │
+    │  │  3번째 요청: 기존 연결 재사용 │ │
+    │  │  → CONNECT 없음 → 감지 ❌    │ │
+    │  └──────────────────────────────┘ │
+```
+
+testenv에서 직접 확인한 현상 (03.27 트러블슈팅).
+
+**요약:**
+- kprobe/tcp_connect: 새 연결에만 반응. 연결 재사용 시 요청 단위 latency 측정 불가
+- sock_ops: 소켓 자체에 붙어있어서 연결 위의 모든 요청을 추적 가능
+
+---
+
+### ③ 어떻게 동작하는가
+
+**attach 방식의 차이:**
+
+```
+kprobe 방식:
+  커널 함수(tcp_connect)에 훅
+  → 시스템 전체의 모든 TCP 연결에 반응
+  → 불필요한 프로세스(브라우저, 시스템 데몬 등)도 다 감지
+
+sock_ops 방식:
+  cgroup에 eBPF 프로그램을 attach
+  → 그 cgroup 소속 프로세스의 소켓에만 적용
+  → 관심 있는 서비스만 선택적으로 추적 가능
+```
+
+**cgroup이란?**
+Control Group. 프로세스들을 묶어서 관리하는 리눅스 기능.
+Docker 컨테이너가 내부적으로 cgroup을 사용함.
+
+```
+cgroup 구조 예시:
+  /sys/fs/cgroup/
+    ├── system.slice/
+    │     └── service_a.service/  ← service_a 프로세스들의 cgroup
+    └── docker/
+          └── <container_id>/    ← 컨테이너의 cgroup
+
+sock_ops attach:
+  service_a의 cgroup에 attach
+  → service_a가 여는 소켓에만 eBPF 적용
+  → service_b나 다른 프로세스는 영향 없음
+```
+
+---
+
+### sock_ops가 받는 이벤트 종류 (op 코드)
+
+| op 코드 | 발생 시점 | MicroTrace 활용 |
+|---------|----------|----------------|
+| `BPF_SOCK_OPS_TCP_CONNECT_CB` | `connect()` 호출 직후 | 연결 시작 타임스탬프 저장 |
+| `BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB` | 3-way handshake 완료 | 연결 latency 계산 |
+| `BPF_SOCK_OPS_RTT_CB` | RTT 업데이트마다 | 요청 단위 RTT 수집 |
+| `BPF_SOCK_OPS_RETRANS_CB` | 재전송 발생 | 재전송 이벤트 감지 |
+| `BPF_SOCK_OPS_STATE_CB` | TCP 상태 변화 | 연결 종료 감지 |
+
+---
+
+### kprobe vs sock_ops 한 눈에 비교
+
+```
+kprobe/tcp_connect:                  sock_ops:
+┌──────────────────────┐             ┌──────────────────────────────┐
+│  새 연결만 감지        │             │  소켓의 전체 생명주기 감지     │
+│  시스템 전체 훅        │             │  cgroup 단위 선택적 추적       │
+│  Keep-Alive 이후 ❌   │             │  Keep-Alive 위 요청 단위 ✅   │
+│  구현 단순            │             │  구현 복잡 (attach 방법 다름) │
+│  Phase 1 ✅ 완료      │             │  Phase 2 ← 지금 여기          │
+└──────────────────────┘             └──────────────────────────────┘
+```
+
+---
+
+### MicroTrace Phase 2 전환 계획
+
+```
+현재 (Phase 1):
+  tcp_trace.bpf.c
+    SEC("kprobe/tcp_connect")         → 연결 시작 감지
+    SEC("kprobe/tcp_rcv_state_process") → latency 계산
+    SEC("tracepoint/tcp/tcp_retransmit_skb") → 재전송 감지
+
+Phase 2 목표:
+  tcp_trace.bpf.c
+    SEC("sockops")                    → 소켓 단위 전체 추적
+      BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB → 연결 latency
+      BPF_SOCK_OPS_RTT_CB            → 요청 단위 RTT
+      BPF_SOCK_OPS_RETRANS_CB        → 재전송 (기존 tracepoint 대체)
+
+  tcp_trace.c (유저 공간)
+    기존: tcp_trace_bpf__attach() (자동 attach)
+    변경: bpf_prog_attach()로 특정 cgroup에 수동 attach
+```
+

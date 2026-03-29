@@ -98,3 +98,66 @@ Client                          Server
 
 재전송이 많다 = 네트워크 불안정 또는 서버 과부하 신호.
 MicroTrace는 재전송 이벤트도 추적함.
+
+---
+
+## HTTP Keep-Alive와 TCP 연결 재사용
+
+### ① 이게 뭔지
+
+HTTP 요청마다 TCP 연결을 새로 맺으면 3-way handshake 비용이 매번 발생함.
+Keep-Alive는 한 번 맺은 TCP 연결을 여러 HTTP 요청에 재사용하는 방식.
+
+### ② 왜 필요한가
+
+```
+Keep-Alive 없을 때 (HTTP/1.0 기본):
+  요청1: [SYN→SYN-ACK→ACK] → GET /ping → [FIN→FIN-ACK]  ← 연결 수립/종료
+  요청2: [SYN→SYN-ACK→ACK] → GET /ping → [FIN→FIN-ACK]  ← 또 연결 수립/종료
+  요청3: [SYN→SYN-ACK→ACK] → GET /ping → [FIN→FIN-ACK]  ← 또또...
+
+Keep-Alive 있을 때 (HTTP/1.1 기본):
+  요청1: [SYN→SYN-ACK→ACK] → GET /ping  ← 연결 한 번만 수립
+  요청2:                       GET /ping  ← 재사용
+  요청3:                       GET /ping  ← 재사용
+  ...                          [FIN→FIN-ACK]  ← 마지막에 한 번만 종료
+```
+
+요청이 많을수록 handshake 비용 절감 효과가 커짐.
+
+### ③ MicroTrace와의 관계
+
+kprobe/tcp_connect는 새 TCP 연결 시점만 감지함.
+Keep-Alive로 연결을 재사용하면 2번째 요청부터는 이벤트가 안 잡힘.
+
+```
+service_a → service_b (Keep-Alive 활성화)
+
+MicroTrace kprobe 출력:
+  [CONNECT] service_a → 127.0.0.1:8080  latency: 36 us  ← 1번만 출력
+  (이후 요청들은 출력 없음 ❌)
+```
+
+→ Phase 2에서 sock_ops로 전환하면 연결 위의 요청 단위 latency도 측정 가능.
+   자세한 내용은 `Study/kernel/ebpf.md` → sock_ops 섹션 참고.
+
+### Go에서 Keep-Alive가 제대로 동작하려면 (03.27 트러블슈팅)
+
+```go
+// ✅ 필수: Body를 끝까지 읽어야 연결 풀에 반환됨
+io.Copy(io.Discard, resp.Body)
+resp.Body.Close()
+
+// ✅ 필수: IdleTimeout 명시 안 하면 ReadTimeout 값이 그대로 사용됨
+srv := &http.Server{
+    ReadTimeout: 5 * time.Second,
+    IdleTimeout: 60 * time.Second,
+}
+```
+
+동작 확인:
+```bash
+ss -tn | grep 8080
+# 포트 번호 고정 → 연결 재사용 중 ✅
+# 포트 번호 변경 → 매번 새 연결 (Keep-Alive 안 되는 것) ❌
+```

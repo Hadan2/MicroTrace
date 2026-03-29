@@ -2,112 +2,74 @@
 //
 // 역할:
 //   1. tcp_trace.bpf.o 를 커널에 로드
-//   2. Ring Buffer 이벤트를 기다렸다가
-//   3. 이벤트 올 때마다 JSON으로 stdout 출력 (Go collector가 파싱)
+//   2. sock_ops 프로그램을 루트 cgroup에 attach
+//   3. Ring Buffer 이벤트를 기다렸다가 JSON으로 stdout 출력 (Go collector가 파싱)
 
-#include <stdio.h>          // printf()
-#include <stdlib.h>         // exit()
-#include <string.h>         // strstr(), sscanf()
-#include <signal.h>         // SIGINT 처리 (Ctrl+C)
-#include <arpa/inet.h>      // inet_ntoa() - IP를 문자열로 변환
-#include <bpf/libbpf.h>     // libbpf API (bpf_object, ring_buffer 등)
-#include <bpf/bpf.h>        // bpf_map_update_elem()
-#include "tcp_trace.skel.h" // bpftool이 자동 생성하는 skeleton 헤더
+#include <stdio.h>            // printf(), fprintf()
+#include <stdlib.h>           // exit()
+#include <signal.h>           // SIGINT 처리 (Ctrl+C)
+#include <fcntl.h>            // open(), O_RDONLY
+#include <unistd.h>           // close()
+#include <arpa/inet.h>        // inet_ntoa() - IP를 문자열로 변환
+#include <bpf/libbpf.h>       // libbpf API (ring_buffer 등)
+#include <bpf/bpf.h>          // bpf_prog_attach(), bpf_prog_detach()
+#include "tcp_trace.skel.h"   // bpftool이 자동 생성하는 skeleton 헤더
 #include "tcp_trace_common.h" // 커널/유저 공유 타입 (struct event, EVENT_TYPE_*)
 
 // ─────────────────────────────────────────────
-// format 파일 파싱 함수
+// cgroup 경로
 //
-// /sys/kernel/debug/tracing/events/tcp/tcp_retransmit_skb/format 을
-// 한 번만 열어서 family/dport/daddr offset을 한꺼번에 추출.
-//
-// 반환값: 0 성공, -1 실패
+// sock_ops는 특정 cgroup에 attach해야 동작함.
+// 루트 cgroup("/sys/fs/cgroup")에 attach하면 시스템 전체 소켓이 대상이 됨.
+// 나중에 service_a의 cgroup 경로로 바꾸면 해당 서비스 소켓만 선택적으로 추적 가능.
 // ─────────────────────────────────────────────
-#define FORMAT_PATH "/sys/kernel/debug/tracing/events/tcp/tcp_retransmit_skb/format"
+#define CGROUP_PATH "/sys/fs/cgroup"
 
-static int parse_offsets(int *off_family, int *off_dport, int *off_daddr)
-{
-    FILE *f = fopen(FORMAT_PATH, "r");
-    if (!f) {
-        fprintf(stderr, "format 파일 열기 실패: %s\n", FORMAT_PATH);
-        return -1;
-    }
-
-    *off_family = *off_dport = *off_daddr = -1;
-
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        int offset = -1;
-        char *p = strstr(line, "offset:");
-        if (!p)
-            continue;
-        sscanf(p, "offset:%d", &offset);
-
-        if      (strstr(line, " family;"))  *off_family = offset;
-        else if (strstr(line, " dport;"))   *off_dport  = offset;
-        else if (strstr(line, " daddr[4];")) *off_daddr  = offset;
-    }
-
-    fclose(f);
-
-    if (*off_family < 0 || *off_dport < 0 || *off_daddr < 0)
-        return -1;
-    return 0;
-}
-
-// 프로그램 종료 플래그 (Ctrl+C 시 루프 탈출용)
+// 프로그램 종료 플래그 (Ctrl+C 시 이벤트 루프 탈출용)
 static volatile int running = 1;
+// detach 시 cgroup_fd가 필요해서 전역으로 보관
+static int cgroup_fd = -1;
 
-// Ctrl+C 핸들러
+// Ctrl+C / SIGTERM 핸들러
 static void handle_signal(int sig)
 {
     running = 0;
 }
 
 // ─────────────────────────────────────────────
-// JSON 출력 함수 (나중에 바이너리로 교체할 때 이 함수만 바꾸면 됨)
+// JSON 출력 함수
 //
-// 출력 형식:
-//   {"pid":1234,"comm":"curl","daddr":"142.250.196.78","dport":443}
+// Ring Buffer 이벤트를 JSON 한 줄로 stdout에 출력.
+// stdout은 JSON 전용 - 상태 메시지는 모두 stderr로 출력.
+// (Go collector가 stdout을 파이프로 읽어서 파싱하기 때문)
 //
-// stdout 으로 출력 → Go collector 가 줄 단위로 읽어서 파싱
+// 나중에 WebSocket 전송으로 교체할 때 이 함수만 바꾸면 됨.
 // ─────────────────────────────────────────────
 static void output_event(const struct event *e)
 {
-    // IP 주소를 "192.168.1.1" 형식 문자열로 변환
+    // e->daddr: big-endian 32비트 IP → "192.168.1.1" 형식 문자열로 변환
     struct in_addr ip_addr = { .s_addr = e->daddr };
     char *ip_str = inet_ntoa(ip_addr);
 
     if (e->type == EVENT_TYPE_RETRANSMIT) {
-        // 재전송 이벤트 JSON 출력
         printf("{\"type\":\"retransmit\",\"pid\":%u,\"comm\":\"%s\",\"daddr\":\"%s\",\"dport\":%u}\n",
-               e->pid,
-               e->comm,
-               ip_str,
-               e->dport);
+               e->pid, e->comm, ip_str, e->dport);
+    } else if (e->type == EVENT_TYPE_RTT) {
+        printf("{\"type\":\"rtt\",\"pid\":%u,\"comm\":\"%s\",\"daddr\":\"%s\",\"dport\":%u,\"latency_us\":%llu}\n",
+               e->pid, e->comm, ip_str, e->dport, e->latency_us);
     } else {
-        // 연결 latency 이벤트 JSON 출력
         printf("{\"type\":\"connect\",\"pid\":%u,\"comm\":\"%s\",\"daddr\":\"%s\",\"dport\":%u,\"latency_us\":%llu}\n",
-               e->pid,
-               e->comm,
-               ip_str,
-               e->dport,
-               e->latency_us);
+               e->pid, e->comm, ip_str, e->dport, e->latency_us);
     }
-
-    // 버퍼 즉시 비우기
-    // 기본적으로 stdout 은 버퍼가 가득 차야 출력됨
-    // Go 가 실시간으로 읽으려면 이벤트마다 즉시 내보내야 함
+    // stdout 버퍼를 즉시 비움 - 이벤트가 Go collector에 실시간으로 전달되도록
     fflush(stdout);
 }
 
 // ─────────────────────────────────────────────
-// Ring Buffer 콜백 함수
+// Ring Buffer 콜백
 //
-// Ring Buffer에 이벤트가 들어올 때마다 자동 호출됨
-// ctx: 컨텍스트 (여기선 미사용)
-// data: Ring Buffer에서 받은 raw 데이터 포인터
-// size: 데이터 크기
+// ring_buffer__poll() 이 이벤트를 감지하면 자동으로 호출됨.
+// data: Ring Buffer에서 받은 raw 이벤트 포인터 (struct event * 로 캐스팅)
 // ─────────────────────────────────────────────
 static int handle_event(void *ctx, void *data, size_t size)
 {
@@ -118,64 +80,65 @@ static int handle_event(void *ctx, void *data, size_t size)
 
 int main(void)
 {
-    // Ctrl+C 시그널 등록
-    signal(SIGINT, handle_signal);
+    signal(SIGINT,  handle_signal);
     signal(SIGTERM, handle_signal);
 
-    // ── 1단계: eBPF skeleton 열기 ──────────────────
-    // tcp_trace_bpf__open(): skeleton이 제공하는 함수
-    // .bpf.o 파일을 메모리에 로드하고 구조체로 감싸줌
+    // ── 1단계: eBPF skeleton 열기 ──────────────────────────────
+    // tcp_trace.skel.h 안에 박힌 .bpf.o 바이트코드를 메모리에 파싱.
+    // 아직 커널에는 아무것도 올라가지 않은 상태.
     struct tcp_trace_bpf *skel = tcp_trace_bpf__open();
     if (!skel) {
         fprintf(stderr, "skeleton 열기 실패\n");
         return 1;
     }
 
-    // ── 2단계: eBPF 프로그램 커널에 로드 ──────────
-    // tcp_trace_bpf__load(): Verifier 검증 후 커널에 로드
+    // ── 2단계: eBPF 프로그램 커널에 로드 ───────────────────────
+    // Verifier 검증 후 Ring Buffer Map과 sock_ops 프로그램을 커널에 등록.
+    // 아직 어디에도 attach되지 않은 상태 - 이벤트 감시 아직 시작 안 됨.
     int err = tcp_trace_bpf__load(skel);
     if (err) {
         fprintf(stderr, "커널 로드 실패: %d\n", err);
         goto cleanup;
     }
 
-    // ── 3단계: tracepoint offset 파싱 후 Map에 저장 ──
-    // format 파일을 한 번만 열어서 3개 offset을 한꺼번에 파싱
-    // → eBPF 프로그램이 Map lookup 1번으로 모든 offset을 읽어 사용
-    int off_family, off_dport, off_daddr;
-    if (parse_offsets(&off_family, &off_dport, &off_daddr) < 0) {
-        fprintf(stderr, "tracepoint offset 파싱 실패\n");
+    // ── 3단계: cgroup fd 열기 ──────────────────────────────────
+    // bpf_prog_attach()는 "어느 cgroup에 붙일지"를 fd(파일 디스크립터)로 받음.
+    // 파일 내용을 읽으려는 게 아니라 fd를 얻기 위해 O_RDONLY로 열기만 함.
+    cgroup_fd = open(CGROUP_PATH, O_RDONLY);
+    if (cgroup_fd < 0) {
+        fprintf(stderr, "cgroup 열기 실패: %s\n", CGROUP_PATH);
+        err = 1;
         goto cleanup;
     }
 
-    fprintf(stderr, "tracepoint offsets: family=%d dport=%d daddr=%d\n",
-            off_family, off_dport, off_daddr);
-
-    struct retransmit_offsets_t offs = {
-        .family = (__u32)off_family,
-        .dport  = (__u32)off_dport,
-        .daddr  = (__u32)off_daddr,
-    };
-    __u32 idx = 0;
-    bpf_map_update_elem(bpf_map__fd(skel->maps.retransmit_offsets), &idx, &offs, BPF_ANY);
-
-    // ── 4단계: kprobe/tracepoint 훅 연결 ──────────
-    // tcp_trace_bpf__attach(): tcp_connect 함수에 kprobe 연결
-    err = tcp_trace_bpf__attach(skel);
+    // ── 4단계: sock_ops 프로그램을 cgroup에 attach ─────────────
+    // sock_ops는 "어느 cgroup에 붙일지"를 런타임에 직접 지정해야 함.
+    // skeleton 자동 attach(tcp_trace_bpf__attach)는 SEC에 대상이 명시된
+    // kprobe/tracepoint 에만 동작하므로, sock_ops는 수동으로 attach.
+    //
+    // 이 순간부터 cgroup_fd가 가리키는 cgroup 소속 소켓에서
+    // TCP 이벤트가 발생할 때마다 handle_sock_ops()가 호출됨.
+    //
+    // bpf_prog_attach 인자:
+    //   prog_fd:             attach할 eBPF 프로그램의 fd
+    //   cgroup_fd:           attach할 cgroup의 fd
+    //   BPF_CGROUP_SOCK_OPS: sock_ops 타입으로 attach
+    //   0:                   flags (현재 미사용)
+    int prog_fd = bpf_program__fd(skel->progs.handle_sock_ops);
+    err = bpf_prog_attach(prog_fd, cgroup_fd, BPF_CGROUP_SOCK_OPS, 0);
     if (err) {
-        fprintf(stderr, "attach 실패: %d\n", err);
+        fprintf(stderr, "sock_ops attach 실패: %d\n", err);
         goto cleanup;
     }
 
-    // ── 5단계: Ring Buffer 설정 ───────────────────
-    // ring_buffer__new(): Ring Buffer 폴러 생성
-    //   - skel->maps.events: .bpf.c 에서 선언한 Ring Buffer Map
-    //   - handle_event: 이벤트 도착 시 호출할 콜백 함수
+    // ── 5단계: Ring Buffer 폴러 설정 ───────────────────────────
+    // skel->maps.events: .bpf.c 에서 선언한 Ring Buffer Map
+    // handle_event: Ring Buffer에 이벤트가 도착할 때 호출할 콜백 함수
     struct ring_buffer *rb = ring_buffer__new(
         bpf_map__fd(skel->maps.events),
         handle_event,
-        NULL,   // 콜백에 전달할 ctx (미사용)
-        NULL    // 추가 옵션 (없음)
+        NULL, // 콜백에 전달할 ctx (미사용)
+        NULL  // 추가 옵션 (없음)
     );
     if (!rb) {
         fprintf(stderr, "ring buffer 생성 실패\n");
@@ -183,14 +146,12 @@ int main(void)
         goto cleanup;
     }
 
-    // 상태 메시지는 stderr 로 출력 (stdout 은 JSON 전용)
-    // Go 가 stdout 을 파싱할 때 이 메시지가 섞이면 JSON 파싱 오류 발생
-    fprintf(stderr, "TCP 연결 추적 시작... (종료: Ctrl+C)\n");
+    // 상태 메시지는 stderr로 출력 (stdout은 JSON 전용)
+    fprintf(stderr, "TCP 연결 추적 시작 (sock_ops)... (종료: Ctrl+C)\n");
 
-    // ── 6단계: 이벤트 루프 ────────────────────────
-    // ring_buffer__poll(): Ring Buffer에 이벤트가 있으면 handle_event 호출
-    //   타임아웃 100ms 마다 한번씩 체크
-    //   이벤트 없으면 그냥 대기 (CPU 낭비 없음)
+    // ── 6단계: 이벤트 루프 ─────────────────────────────────────
+    // 100ms마다 Ring Buffer를 체크. 이벤트 있으면 handle_event() 호출.
+    // 이벤트 없으면 CPU를 점유하지 않고 대기.
     while (running) {
         err = ring_buffer__poll(rb, 100 /* ms */);
         if (err == -EINTR) { // Ctrl+C 인터럽트
@@ -205,7 +166,17 @@ int main(void)
 
     ring_buffer__free(rb);
 
+    // ── 7단계: sock_ops detach ──────────────────────────────────
+    // 수동으로 attach했으므로 수동으로 detach해야 함.
+    // detach 안 하면 프로그램 종료 후에도 cgroup에 eBPF hook이 남아있어서
+    // 다음 실행 시 attach 에러가 발생하거나 의도치 않은 이벤트가 계속 처리됨.
+    if (cgroup_fd >= 0) {
+        bpf_prog_detach(cgroup_fd, BPF_CGROUP_SOCK_OPS);
+        close(cgroup_fd);
+    }
+
 cleanup:
+    // skeleton 해제: 커널에 로드된 eBPF 프로그램과 Map 정리
     tcp_trace_bpf__destroy(skel);
     return err < 0 ? -err : err;
 }

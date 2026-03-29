@@ -21,34 +21,34 @@ import (
 // Event 구조체 - tcp_trace.c 의 JSON 출력과 필드가 일치해야 함
 //
 // json:"pid" → JSON의 "pid" 키와 이 필드를 연결
+// sock_ops는 pid/comm 접근 불가 → pid 필드에 local_port가 들어옴
 // ─────────────────────────────────────────────
 type Event struct {
-	Type      string `json:"type"`       // "connect" or "retransmit"
-	PID       uint32 `json:"pid"`
-	Comm      string `json:"comm"`
+	Type      string `json:"type"`       // "connect", "rtt", "retransmit"
+	PID       uint32 `json:"pid"`        // 실제로는 local_port (소켓 식별용)
+	Comm      string `json:"comm"`       // sock_ops 제한으로 항상 빈 문자열
 	DAddr     string `json:"daddr"`
 	DPort     uint16 `json:"dport"`
-	LatencyUs uint64 `json:"latency_us"` // connect 이벤트에서만 유효
+	LatencyUs uint64 `json:"latency_us"` // connect/rtt 이벤트에서 유효
 }
 
 // ─────────────────────────────────────────────
 // 출력 함수 (나중에 WebSocket 전송으로 교체할 때 이 함수만 바꾸면 됨)
 // ─────────────────────────────────────────────
 func handleEvent(e Event) {
-	if e.Type == "retransmit" {
-		fmt.Printf("[RETRANSMIT] PID: %-6d  COMM: %-16s  ->  %s:%d\n",
-			e.PID,
-			e.Comm,
-			e.DAddr,
-			e.DPort,
+	switch e.Type {
+	case "retransmit":
+		fmt.Printf("[RETRANSMIT] lport: %-6d  ->  %s:%d\n",
+			e.PID, e.DAddr, e.DPort,
 		)
-	} else {
-		fmt.Printf("[CONNECT]    PID: %-6d  COMM: %-16s  ->  %s:%d  latency: %d us\n",
-			e.PID,
-			e.Comm,
-			e.DAddr,
-			e.DPort,
-			e.LatencyUs,
+	case "rtt":
+		// Keep-Alive 연결 위의 요청마다 갱신되는 RTT
+		fmt.Printf("[RTT]        lport: %-6d  ->  %s:%d  rtt: %d us\n",
+			e.PID, e.DAddr, e.DPort, e.LatencyUs,
+		)
+	default: // connect
+		fmt.Printf("[CONNECT]    lport: %-6d  ->  %s:%d  rtt: %d us\n",
+			e.PID, e.DAddr, e.DPort, e.LatencyUs,
 		)
 	}
 }

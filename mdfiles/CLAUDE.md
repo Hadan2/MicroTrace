@@ -8,14 +8,20 @@
 - 한글로 설명할 것.
 
 ## 📖 Study 폴더 관리 규칙
-- 프로젝트 루트의 `Study/` 폴더 하위에 주제별 `.md` 파일을 생성/관리
-- 새로운 개념이 등장할 때마다 해당 주제의 파일에 추가. 파일이 없으면 새로 생성
-- 파일 분류 기준:
-  - `Study/linux.md` ← Linux 명령어, 파일시스템, 권한 등
-  - `Study/ebpf.md` ← eBPF 개념, kprobe, Map, Ring Buffer, Verifier 등
-  - `Study/tcp.md` ← TCP 연결 흐름, RTT, 재전송, 3-way handshake 등
-  - `Study/go.md` ← Go 언어 문법, goroutine, channel 등
-  - 새 주제 등장 시 새 파일 생성
+- 프로젝트 루트의 `Study/` 폴더 하위에 **카테고리 폴더**로 분류하여 관리
+- 새로운 개념이 등장할 때마다 해당 파일에 추가. 파일이 없으면 새로 생성
+- 폴더/파일 분류 기준:
+  - `Study/kernel/ebpf.md` ← eBPF 개념, kprobe, tracepoint, Map, Ring Buffer, Verifier, Skeleton, CO-RE, sock_ops
+  - `Study/kernel/c_language.md` ← C 언어 문법, 포인터, 구조체 등
+  - `Study/kernel/go.md` ← Go 언어 문법, goroutine, channel 등
+  - `Study/network/tcp.md` ← TCP 연결 흐름, RTT, 재전송, Keep-Alive 등
+  - `Study/network/microservices.md` ← MSA 개념
+  - `Study/network/Netsim.md` ← tc netem 패킷 지연/손실 주입
+  - `Study/infra/linux.md` ← Linux 명령어, 파일시스템, 권한 등
+  - `Study/infra/docker.md` ← Docker, 컨테이너 등
+  - `Study/project/flow.md` ← MicroTrace 전체 빌드/실행 흐름
+  - `Study/Errors/` ← 날짜별 트러블슈팅 (03.13_errors.md 형식)
+  - 새 주제 등장 시 적절한 폴더에 새 파일 생성
 - 설명은 비유/흐름도를 포함하여 자세하게 작성
 
 ## 🎯 프로젝트 개요

@@ -8,46 +8,41 @@
 
 // ─────────────────────────────────────────────
 // 이벤트 타입
+//
+// #define 은 컴파일 전에 텍스트를 숫자로 치환하는 매크로.
+// 코드에서 숫자 대신 의미 있는 이름으로 이벤트를 구분할 수 있게 함.
 // ─────────────────────────────────────────────
-#define EVENT_TYPE_CONNECT     1
-#define EVENT_TYPE_RETRANSMIT  2
+#define EVENT_TYPE_CONNECT     1  // TCP 연결 수립 완료 (첫 RTT)
+#define EVENT_TYPE_RETRANSMIT  2  // TCP 재전송 발생
+#define EVENT_TYPE_RTT         3  // Keep-Alive 연결 위의 요청 단위 RTT 갱신
 
 // ─────────────────────────────────────────────
 // 이벤트 구조체 - Ring Buffer로 전달할 데이터 형식
 //
+// 커널(tcp_trace.bpf.c)이 이 구조체에 데이터를 채워 Ring Buffer에 넣으면
+// 유저 공간(tcp_trace.c)이 꺼내서 JSON으로 출력함.
+//
 // 필드를 크기 내림차순으로 배치해서 컴파일러 패딩을 제거.
-// clang(bpf.c)과 gcc(trace.c)가 동일하게 해석하도록 보장.
+// clang(bpf.c)과 gcc(trace.c)가 동일한 메모리 레이아웃으로 해석하도록 보장.
 //
 // 메모리 레이아웃:
-//   latency_us [8바이트]
-//   pid        [4바이트]
-//   daddr      [4바이트]
+//   latency_us [8바이트]  ← CONNECT/RTT: RTT(마이크로초), RETRANSMIT: 0
+//   pid        [4바이트]  ← sock_ops는 pid 불가 → local_port로 대체
+//   daddr      [4바이트]  ← 목적지 IPv4 (big-endian, inet_ntoa로 변환해서 출력)
 //   dport      [2바이트]
-//   type       [1바이트]
-//   pad        [1바이트] ← 명시적 패딩 (comm 정렬)
-//   comm       [16바이트]
-//   합계: 36바이트, 패딩 없음
+//   type       [1바이트]  ← EVENT_TYPE_CONNECT / RTT / RETRANSMIT
+//   pad        [1바이트]  ← 명시적 패딩 (comm을 8바이트 경계에 정렬)
+//   comm       [16바이트] ← 프로그램 이름 (bpf_get_current_comm이 최대 16바이트)
+//   합계: 36바이트, 컴파일러 자동 패딩 없음
 // ─────────────────────────────────────────────
 struct event {
-    __u64 latency_us;   // TCP 연결 latency (마이크로초, CONNECT에서만 유효)
+    __u64 latency_us;   // RTT (마이크로초). CONNECT 이벤트에서만 유효
     __u32 pid;          // 프로세스 ID
-    __u32 daddr;        // 목적지 IP
+    __u32 daddr;        // 목적지 IPv4 주소 (big-endian)
     __u16 dport;        // 목적지 포트
     __u8  type;         // 이벤트 타입 (EVENT_TYPE_CONNECT or EVENT_TYPE_RETRANSMIT)
     __u8  pad;          // 명시적 패딩
     char  comm[16];     // 프로그램 이름
-};
-
-// ─────────────────────────────────────────────
-// tracepoint offset 구조체 - Array Map의 value 타입
-//
-// 유저 공간이 format 파일을 파싱해서 이 구조체를 Map에 저장하면
-// eBPF 프로그램이 Map lookup 1번으로 모든 offset을 읽음
-// ─────────────────────────────────────────────
-struct retransmit_offsets_t {
-    __u32 family;   // family 필드의 offset
-    __u32 dport;    // dport  필드의 offset
-    __u32 daddr;    // daddr  필드의 offset
 };
 
 #endif // TCP_TRACE_COMMON_H
