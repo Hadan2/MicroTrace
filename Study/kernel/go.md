@@ -316,9 +316,248 @@ json.Unmarshal([]byte(`{"pid":1234,"comm":"curl"}`), &e)
 
 ---
 
-## (추가 예정)
+---
 
-Phase 2 진행하면서 필요한 개념 추가:
-- WebSocket
-- binary 패키지 (바이너리 파싱)
-- context (취소/타임아웃 전파)
+## select (여러 channel 동시 대기)
+
+`switch`처럼 생겼지만, **"준비된 channel"** 을 고르는 문법입니다.
+
+```go
+select {
+case msg := <-broadcast:
+    // broadcast channel에 데이터가 들어오면 실행
+    sendToAllClients(msg)
+
+case conn := <-register:
+    // register channel에 데이터가 들어오면 실행
+    clients[conn] = true
+
+case conn := <-unregister:
+    // unregister channel에 데이터가 들어오면 실행
+    delete(clients, conn)
+}
+```
+
+```
+동시에 여러 channel이 준비되면 Go가 랜덤으로 하나를 선택
+아무것도 준비 안 됐으면 준비될 때까지 블로킹 (대기)
+```
+
+WebSocket 허브처럼 **"여러 종류의 이벤트를 하나의 goroutine에서 처리"** 할 때 핵심으로 사용됩니다.
+
+`default` 케이스를 넣으면 아무 channel도 준비 안 됐을 때 블로킹 없이 즉시 넘어갑니다:
+
+```go
+select {
+case msg := <-ch:
+    process(msg)
+default:
+    // ch가 비어있으면 여기 실행 (블로킹 안 함)
+}
+```
+
+---
+
+## sync.Mutex (동시 접근 보호)
+
+goroutine 여러 개가 같은 변수를 동시에 읽고 쓰면 데이터가 망가집니다 (Race Condition).
+`sync.Mutex`는 한 번에 하나의 goroutine만 접근하도록 잠그는 자물쇠입니다.
+
+```go
+import "sync"
+
+type Hub struct {
+    mu      sync.Mutex
+    clients map[*websocket.Conn]bool
+}
+
+// goroutine A가 클라이언트 추가 중
+func (h *Hub) add(conn *websocket.Conn) {
+    h.mu.Lock()           // 자물쇠 잠금 (다른 goroutine은 대기)
+    h.clients[conn] = true
+    h.mu.Unlock()         // 자물쇠 해제 (대기 중인 goroutine 진입 가능)
+}
+
+// goroutine B가 같은 시점에 순회 시도 → Lock 걸려 있으면 대기
+func (h *Hub) broadcast(msg []byte) {
+    h.mu.Lock()
+    defer h.mu.Unlock()   // 함수 끝날 때 자동 해제 (defer 활용)
+    for conn := range h.clients {
+        conn.WriteMessage(websocket.TextMessage, msg)
+    }
+}
+```
+
+```
+자물쇠 없을 때 (위험):
+  goroutine A: clients 맵에 추가 중...
+  goroutine B: 동시에 clients 맵 순회 중...
+  → 맵이 깨짐 (panic: concurrent map read and map write)
+
+자물쇠 있을 때 (안전):
+  goroutine A: Lock → 추가 → Unlock
+  goroutine B: Lock 시도 → 대기 → A 끝나면 Lock → 순회 → Unlock
+```
+
+---
+
+## context (취소 신호 전파)
+
+> "이 goroutine들아, 이제 그만해" 라는 신호를 동시에 보내는 도구
+
+Ctrl+C를 누르거나 클라이언트 연결이 끊겼을 때, 그 goroutine과 연관된 모든 작업을 깔끔하게 종료해야 합니다.
+
+```go
+import "context"
+
+// context 생성 (취소 가능한 버전)
+ctx, cancel := context.WithCancel(context.Background())
+
+// goroutine에게 context 전달
+go func(ctx context.Context) {
+    for {
+        select {
+        case <-ctx.Done():
+            // cancel()이 호출되면 ctx.Done() channel이 닫힘
+            // → 이 case가 실행됨 → goroutine 종료
+            fmt.Println("종료")
+            return
+        case msg := <-eventCh:
+            sendToClient(msg)
+        }
+    }
+}(ctx)
+
+// 나중에 클라이언트 연결이 끊기면
+cancel()  // ctx.Done()이 닫힘 → 위 goroutine이 종료됨
+```
+
+```
+parent context
+    │
+    ├── child goroutine 1  ← cancel() 호출 시 동시에 종료 신호
+    ├── child goroutine 2  ←
+    └── child goroutine 3  ←
+```
+
+타임아웃도 설정할 수 있습니다:
+
+```go
+// 30초 후 자동으로 cancel
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+```
+
+---
+
+## goroutine 누수 (Goroutine Leak)
+
+WebSocket 서버에서 자주 발생하는 문제입니다. goroutine을 시작했는데 끝내는 코드가 없으면 메모리를 계속 차지합니다.
+
+```
+누수 상황:
+  클라이언트 1000명 접속 → goroutine 1000개 생성
+  클라이언트 999명 끊김  → goroutine은 여전히 1000개 실행 중
+                              ↑ 이게 누수
+```
+
+방지 방법:
+
+```go
+func handleClient(conn *websocket.Conn) {
+    defer conn.Close()  // 함수 끝날 때 반드시 연결 종료
+
+    for {
+        _, msg, err := conn.ReadMessage()
+        if err != nil {
+            // 클라이언트가 끊기면 ReadMessage가 에러 반환
+            // → err != nil → return → defer conn.Close() 실행
+            return
+        }
+        process(msg)
+    }
+}
+```
+
+클라이언트 연결이 끊기면 `ReadMessage()`가 에러를 반환합니다. 그 시점에 goroutine이 return하도록 반드시 에러 처리를 해야 합니다.
+
+---
+
+## buffered channel (버퍼 있는 channel)
+
+기본 channel은 보내는 쪽과 받는 쪽이 동시에 준비돼야 합니다 (동기).
+buffered channel은 버퍼 크기만큼 받는 쪽이 준비 안 돼도 넣을 수 있습니다 (비동기).
+
+```go
+// 버퍼 없는 channel: 받는 쪽 준비 전까지 블로킹
+ch := make(chan Event)
+
+// 버퍼 있는 channel: 버퍼(256개)가 찰 때까지 블로킹 없이 넣기 가능
+ch := make(chan Event, 256)
+```
+
+```
+버퍼 없는 channel:
+  생산자: ch <- event  → 소비자가 받을 때까지 여기서 멈춤
+  소비자: e := <-ch   → 생산자가 넣을 때까지 여기서 멈춤
+
+버퍼 있는 channel (크기 3):
+  생산자: ch <- e1  → OK (버퍼: [e1])
+  생산자: ch <- e2  → OK (버퍼: [e1, e2])
+  생산자: ch <- e3  → OK (버퍼: [e1, e2, e3])
+  생산자: ch <- e4  → 버퍼 꽉 참 → 소비자가 꺼낼 때까지 블로킹
+```
+
+MicroTrace에서 eBPF 이벤트는 짧은 시간에 많이 쏟아질 수 있습니다. broadcast channel에 버퍼를 주면 WebSocket 전송이 잠깐 느려져도 이벤트를 잃지 않습니다.
+
+---
+
+## http.Handler 인터페이스
+
+Go의 HTTP 서버는 `Handler` 인터페이스를 기반으로 동작합니다.
+
+```go
+// Handler 인터페이스 (내부 정의)
+type Handler interface {
+    ServeHTTP(ResponseWriter, *Request)
+}
+
+// 함수를 Handler로 등록하는 편의 함수
+http.HandleFunc("/ws", wsHandler)
+// 내부적으로: http.Handle("/ws", http.HandlerFunc(wsHandler)) 와 동일
+
+// ResponseWriter: 응답을 쓰는 인터페이스
+// *Request: 요청 정보 (헤더, URL, Body 등)
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+    // gorilla/websocket의 Upgrade는 w와 r을 받아서
+    // HTTP 연결을 WebSocket으로 전환함
+    conn, _ := upgrader.Upgrade(w, r, nil)
+}
+```
+
+---
+
+## WriteMessage 동시성 주의
+
+`gorilla/websocket`의 `Conn`은 **동시에 WriteMessage를 호출하면 패닉** 이 납니다.
+
+```
+잘못된 구조:
+  goroutine A: conn.WriteMessage(이벤트1)
+  goroutine B: conn.WriteMessage(이벤트2)  ← 동시 호출 → 패닉!
+
+올바른 구조:
+  하나의 goroutine에서만 WriteMessage 호출
+  (허브 패턴에서 Run() goroutine이 전담)
+```
+
+```go
+// 올바른 패턴: 모든 쓰기를 한 goroutine이 담당
+func (h *Hub) Run() {
+    for msg := range h.broadcast {
+        for conn := range h.clients {
+            conn.WriteMessage(websocket.TextMessage, msg)  // 여기서만 씀
+        }
+    }
+}
+```

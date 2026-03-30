@@ -257,7 +257,236 @@ sock_ops 방식:
 
 ---
 
-## 12. 확장 가능성
+## 12. 확장 지표 계획
+
+현재 수집 중인 기본 지표(RTT, 재전송) 외에 아래 지표들을 단계적으로 추가합니다.
+
+### 우선순위 높음
+
+**Jitter (RTT 변동폭)**
+
+레이턴시 스파이크를 탐지하려면 "RTT가 높다"가 아니라 "RTT가 갑자기 튀었다"를 알아야 합니다. 현재 `srtt_us`는 커널이 EWMA로 평활화한 값이라 500ms 스파이크가 발생해도 부드럽게 반영됩니다. 실제 스파이크를 잡으려면 `mdev_us`(RTT Mean Deviation)가 필요합니다.
+
+```c
+e->jitter_us = skops->mdev_us >> 3;  // mdev도 고정소수점
+```
+
+**연결 종료 상태 (RST / FIN / Timeout)**
+
+연결이 어떻게 끝났는지 파악하면 장애 원인을 분류할 수 있습니다.
+
+| 상태 | 의미 |
+|---|---|
+| 정상 FIN | 클라이언트/서버가 정상 종료 |
+| RST 수신 | 상대방이 연결을 강제 끊음 (서버 에러, 방화벽 차단) |
+| Timeout | 응답 없음 (서비스 다운, 네트워크 단절) |
+
+`BPF_SOCK_OPS_STATE_CB`를 추가하면 "이 서비스 연결이 RST로 끊기는 비율이 15%" 같은 진단이 가능합니다.
+
+### 우선순위 중간
+
+**Congestion Window (cwnd)**
+
+네트워크가 느린 원인이 실제 네트워크 지연인지, TCP 혼잡 제어가 속도를 줄인 것인지 구분하는 데 사용합니다.
+
+- cwnd가 급감 → 패킷 유실 → TCP가 속도를 줄인 것
+- cwnd는 정상인데 RTT만 높음 → 순수 네트워크 지연
+
+**바이트 카운터 (Throughput)**
+
+연결별로 얼마나 데이터를 주고받았는지 파악해 "이 연결이 중요한 연결인지" 판단하는 데 사용합니다. 연결 종료 시점(`STATE_CB`)에 한 번만 기록하므로 오버헤드가 거의 없습니다.
+
+```c
+skops->bytes_sent
+skops->bytes_received
+```
+
+### 우선순위 낮음
+
+| 지표 | 접근 방법 | 이유 |
+|---|---|---|
+| SYN Retransmission | `BPF_SOCK_OPS_TCP_CONNECT_CB` 시점 추적 | 연결 자체가 안 되는 경우에만 유의미 |
+| Receive Window | `skops->rcv_wnd` | cwnd보다 원인 분석 기여도 낮음 |
+| Delivery Rate | `skops->rate_delivered` | Phase 3 상세 분석 시 추가 |
+
+### 확장 후 struct event 구조
+
+```c
+// tcp_trace_common.h
+
+#define EVENT_TYPE_CONNECT     1
+#define EVENT_TYPE_RTT         2
+#define EVENT_TYPE_RETRANSMIT  3
+#define EVENT_TYPE_CLOSE       4
+
+struct event {
+    __u8  type;
+    __u32 pid;            // local_port (소켓 식별용)
+    __u32 daddr;
+    __u16 dport;
+    char  comm[16];
+
+    // 기존
+    __u64 latency_us;     // srtt_us >> 3
+
+    // Phase 2 추가
+    __u64 timestamp_ns;   // bpf_ktime_get_ns()
+    __u64 jitter_us;      // mdev_us >> 3
+    __u32 snd_cwnd;       // congestion window
+    __u32 total_retrans;  // 누적 재전송 횟수
+
+    // CLOSE 이벤트용
+    __u32 old_state;      // 이전 TCP 상태
+    __u64 bytes_sent;
+    __u64 bytes_received;
+};
+```
+
+---
+
+## 13. Correlated Monitoring — CPU/IO 상관관계 분석
+
+### 왜 필요한가
+
+로컬 Docker Compose 환경에서는 물리 네트워크 구간이 없습니다. 서비스 간 통신은 같은 머신 내부 브릿지 네트워크를 통하므로 RTT가 거의 0에 가깝습니다.
+
+```
+로컬 Docker Compose:
+  service-a → service-b RTT = 150ms  (높다!)
+
+그런데 왜 150ms인지 알 수 없음:
+  원인 후보 1: 네트워크 문제?  → 로컬에선 거의 없음
+  원인 후보 2: service-b CPU 포화?  → 모름
+  원인 후보 3: service-b 디스크 IO 대기?  → 모름
+  원인 후보 4: service-b 내부 로직 느림?  → eBPF로 못 잡음
+```
+
+즉, RTT 단독으로는 원인을 찾을 수 없습니다. CPU/IO 지표를 같은 타임라인에 겹쳐봐야 원인이 보입니다:
+
+```
+Correlated Monitoring 추가 후:
+  service-a → service-b RTT = 150ms
+  + 그 시점 service-b CPU = 98%  ← 바로 원인 특정
+```
+
+### 기획서 방향 수정
+
+```
+수정 전:
+  주기능: 네트워크 토폴로지
+  보조:   CPU/IO 상관관계
+
+수정 후 (더 정확한 포지셔닝):
+  주기능: "레이턴시 스파이크의 원인을 찾아준다"
+             ├── 네트워크 지표 (RTT, 재전송)       ← 동등한 위치
+             └── 시스템 지표 (CPU throttling, IO wait) ← 동등한 위치
+```
+
+타겟이 "로컬 Docker Compose 환경의 스타트업"이라면 CPU/IO 지표가 네트워크 지표보다 더 직접적인 가치를 줍니다.
+
+### 구현 순서 (수정)
+
+```
+Phase 1 데이터 수집 완성:
+  ├── 네트워크: RTT + Jitter + 재전송 (이미 있음)
+  └── 시스템:  컨테이너별 CPU throttling + IO wait (추가)
+
+Phase 2 웹 UI:
+  ├── 토폴로지 화면 (서비스 간 연결 + 레이턴시 색상)
+  └── 상세 화면 (RTT 그래프 + CPU 그래프 시간 동기화)
+
+Phase 3 상관관계 분석:
+  └── "RTT 스파이크 = CPU 포화 때문" 자동 판별
+```
+
+> **참고:** CPU/IO 지표 수집 자체는 구현할 수 있지만, 보여줄 화면(WebSocket + UI)이 먼저 있어야 의미가 생깁니다. 수집은 Phase 1 말미, 시각화는 Phase 2에서 진행합니다.
+
+---
+
+## 14. 배포 환경별 전략
+
+### 타겟 페르소나의 실제 인프라
+
+```
+단계 1: 로컬 개발
+  docker-compose up
+  → 개발자 노트북에서 전부 돌림
+
+단계 2: 클라우드 초기  ← MicroTrace의 골든 타겟
+  EC2 3대
+  ├── EC2-1: service-a, service-b
+  ├── EC2-2: service-c, postgres
+  └── EC2-3: redis, service-d
+  → 각 서버에서 docker-compose 또는 프로세스로 실행
+  → k8s 없음, 오케스트레이션 없음
+
+단계 3: 성장 후
+  ECS or Kubernetes
+  → 이 단계 가면 Datadog 살 돈도 생김
+```
+
+MicroTrace가 가장 가치를 발휘하는 구간은 **단계 2**입니다. k8s 쓸 여유 없고, Datadog 비싸고, 서버 몇 대에 Docker로 운영하는 팀.
+
+### 환경별 비교
+
+| | 환경 1: 로컬 Docker Compose | 환경 2: EC2 멀티 호스트 | 환경 3: Kubernetes |
+|---|---|---|---|
+| 특징 | 단일 머신, 네트워크 병목 없음 | 여러 서버, VPC 네트워크 | 오케스트레이션, Pod IP 유동적 |
+| 주요 병목 | CPU, IO | 네트워크 + CPU + IO 전부 | 네트워크 + 자원 경합 |
+| ServiceResolver | DockerResolver | StaticResolver / EC2 태그 | K8sResolver |
+| Agent 배포 | 1개 | 서버마다 1개 + 중앙 Collector | DaemonSet |
+
+로컬에서 의미 없던 네트워크 지연이 EC2 환경에서는 진짜 측정 대상이 됩니다 (VPC 내부 정상 RTT: 1~5ms, 스파이크 시 수십 ms).
+
+### EC2 멀티 호스트 아키텍처
+
+```
+EC2-1                    EC2-2                    EC2-3
+┌─────────────┐         ┌─────────────┐         ┌─────────────┐
+│ [eBPF agent]│         │ [eBPF agent]│         │ [eBPF agent]│
+│ [sender]    │──gRPC──▶│             │         │ [sender]    │
+└─────────────┘         │  [중앙      │◀──gRPC──└─────────────┘
+                        │  Collector] │
+                        │  [WebSocket]│
+                        └──────┬──────┘
+                               │
+                            [웹 UI]
+```
+
+EC2-1의 service-a → EC2-2의 service-b, VPC 구간 RTT가 높을 때 즉시 감지합니다.
+
+### ServiceResolver 인터페이스
+
+환경에 따라 IP → 서비스 이름 매핑 방식이 다르므로, 공통 인터페이스를 두고 구현체를 교체하는 방식을 사용합니다.
+
+```go
+// collector/resolver/resolver.go
+type ServiceResolver interface {
+    Resolve(ip string) string  // IP → 서비스 이름
+}
+
+// 지금 구현: Docker API로 IP → 컨테이너 이름 조회
+type DockerResolver struct { ... }
+
+// EC2 환경: IP→이름 설정 파일 또는 EC2 태그 기반 조회
+type StaticResolver struct { ... }
+
+// 나중에 추가: k8s API로 Pod/Service 조회
+type KubernetesResolver struct { ... }
+```
+
+### gRPC 전환 시점
+
+agent → collector 통신을 gRPC로 전환하는 것은 **EC2 멀티 호스트(단계 2) 진입 시점**에 자연스럽게 필요해집니다. 처음부터 도입할 필요 없이, 로컬 단일 호스트에서는 현재 JSON 파이프 방식으로 충분합니다.
+
+```
+Phase 1 (로컬): agent → stdout JSON → collector (현재)
+Phase 2 (EC2):  agent → gRPC → 중앙 Collector  (이 시점에 전환)
+```
+
+---
+
+## 15. 확장 가능성
 
 - anomaly detection (ML 기반 이상 패턴 탐지)
 - Kubernetes integration (Pod/Service 단위 추적)

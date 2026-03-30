@@ -11,9 +11,10 @@ Study/
 ├── kernel/         ← eBPF, C 언어, Go
 │   ├── ebpf.md     ← kprobe, tracepoint, Map, Ring Buffer, Verifier, Skeleton, CO-RE, sock_ops
 │   ├── c_language.md
-│   └── go.md
-├── network/        ← TCP, MSA, Netsim
+│   └── go.md       ← 기본 문법, goroutine, channel, select, sync.Mutex, context, HTTP
+├── network/        ← TCP, MSA, Netsim, WebSocket
 │   ├── tcp.md      ← 3-way handshake, RTT, 재전송, Keep-Alive
+│   ├── websocket.md ← WebSocket 프로토콜, gorilla/websocket, Hub 패턴, 브로드캐스트
 │   ├── microservices.md
 │   └── Netsim.md
 ├── infra/          ← Linux, Docker
@@ -67,15 +68,17 @@ Study/
 
 ## Phase 2 - sock_ops 전환 + 실시간 스트리밍 🔲 진행 중
 
-### 🔲 kprobe → sock_ops 전환
-- 소켓 단위 TCP latency 측정
-- Keep-Alive 연결 위의 요청 단위 추적
-- cgroup 기반 서비스 선택적 적용
+### ✅ kprobe → sock_ops 전환 완료
+- ACTIVE_ESTABLISHED_CB: 연결 수립 시 RTT 측정 + RTT_CB 플래그 활성화
+- RTT_CB: Keep-Alive 연결 위 요청별 RTT 갱신 (핵심)
+- RETRANS_CB: 재전송 발생 감지
+- 루트 cgroup(/sys/fs/cgroup)에 수동 attach
 - 개념: `Study/kernel/ebpf.md` → sock_ops 섹션
 
 ### 🔲 Go collector WebSocket 서버 추가
-- `collector/main.go`의 `handleEvent()` → WebSocket 전송으로 교체
-- agent → collector 통신: JSON → 바이너리 직렬화로 교체 예정
+- `collector/main.go`의 `handleEvent()` → WebSocket 브로드캐스트로 교체
+- 개념: `Study/network/websocket.md`, `Study/kernel/go.md` → select, sync.Mutex, context 섹션
+- agent → collector 통신: JSON → 바이너리 직렬화로 교체 예정 (지표 확정 후)
 
 ---
 
