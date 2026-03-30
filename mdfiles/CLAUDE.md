@@ -26,7 +26,7 @@
 
 ## 🎯 프로젝트 개요
 MicroTrace는 MSA 환경에서 1ms 미만의 지연 시간(Latency Spike)과 TCP 재전송을 추적하는 eBPF 기반 실시간 네트워크 프로파일러입니다.
-개발 기획서는 **README.md** 를 참고하세요.
+개발 기획서는  **README.md** 를 참고하세요.
 
 ## 🛠 기술 스택
 - **커널/에이전트:** C, eBPF (libbpf / cilium/ebpf 사용)
