@@ -1,0 +1,75 @@
+// model/event.go
+//
+// 프로젝트 전체에서 사용하는 공유 타입을 한 곳에 정의한다.
+// 여러 패키지(agent, stats, hub)가 각자 타입을 정의하면
+// 필드 하나 바뀔 때 여러 파일을 고쳐야 한다.
+// 이 파일 하나만 수정하면 전 패키지에 전파된다.
+
+package model
+
+// ─────────────────────────────────────────────
+// Event — agent(C 바이너리)가 JSON으로 출력하는 원시 이벤트
+//
+// tcp_trace_common.h 의 struct event 와 필드가 일치해야 한다.
+// Phase 2에서 필드가 추가되면 여기와 tcp_trace_common.h 두 곳만 수정한다.
+// ─────────────────────────────────────────────
+type Event struct {
+	Type      string `json:"type"`        // "connect" | "rtt" | "retransmit"
+	PID       uint32 `json:"pid"`         // sock_ops 제한으로 local_port 대체 사용
+	Comm      string `json:"comm"`        // 프로세스 이름 (sock_ops에선 항상 빈 문자열)
+	DAddr     string `json:"daddr"`       // 목적지 IPv4 문자열 (예: "172.17.0.3")
+	DPort     uint16 `json:"dport"`       // 목적지 포트
+	LatencyUs uint64 `json:"latency_us"`  // RTT (마이크로초). retransmit 이벤트에서는 0
+}
+
+// ─────────────────────────────────────────────
+// OutboundMsg — WebSocket을 통해 클라이언트로 나가는 모든 메시지의 봉투(envelope)
+//
+// msg_type 필드로 클라이언트가 메시지 종류를 구분한다.
+//   "event"   → RawEvent 필드 사용
+//   "stats"   → StatSnapshot 필드 사용
+//
+// 두 종류를 하나의 타입으로 묶은 이유:
+//   hub.Broadcast()가 단일 타입만 받으면 되고,
+//   클라이언트 JS도 switch(msg.msg_type) 하나로 처리 가능.
+// ─────────────────────────────────────────────
+// OutboundMsg — WebSocket을 통해 클라이언트로 나가는 모든 메시지의 봉투(envelope)
+//
+// 포인터 임베딩 대신 명시적 필드를 사용한다.
+// 포인터 임베딩 + omitempty 조합은 Go JSON 직렬화 시 내부 필드가
+// 인라인으로 펼쳐지지 않고 통째로 생략되는 버그가 있다.
+// 명시적 필드를 쓰면 항상 예측 가능한 JSON 구조가 보장된다.
+type OutboundMsg struct {
+	MsgType string `json:"msg_type"` // "event" | "stats"
+
+	// MsgType == "event" 일 때 채워진다. 나머지는 null.
+	Event *RawEvent `json:"event,omitempty"`
+
+	// MsgType == "stats" 일 때 채워진다. 나머지는 null.
+	Stats *StatSnapshot `json:"stats,omitempty"`
+}
+
+// RawEvent — Event 에 서비스 이름(resolver 결과)을 붙인 실시간 이벤트
+type RawEvent struct {
+	Type        string `json:"type"`         // "connect" | "rtt" | "retransmit"
+	SrcService  string `json:"src_service"`  // resolver가 채운 출발지 서비스 이름
+	DstService  string `json:"dst_service"`  // resolver가 채운 목적지 서비스 이름
+	DPort       uint16 `json:"dport"`
+	LatencyUs   uint64 `json:"latency_us"`
+	TimestampNs int64  `json:"timestamp_ns"` // collector 수신 시각 (Unix nanosecond)
+}
+
+// StatSnapshot — 1초마다 stats 패키지가 생성하는 집계 결과
+//
+// 클라이언트는 이 메시지로 토폴로지 뷰의 색상·두께를 업데이트한다.
+type StatSnapshot struct {
+	SrcService      string  `json:"src_service"`
+	DstService      string  `json:"dst_service"`
+	P50Us           uint64  `json:"p50_us"`
+	P95Us           uint64  `json:"p95_us"`
+	P99Us           uint64  `json:"p99_us"`
+	RetransmitCount uint32  `json:"retransmit_count"`
+	SampleCount     int     `json:"sample_count"`     // 이번 1초 구간 RTT 샘플 수
+	IsSpike         bool    `json:"is_spike"`          // 최근 RTT가 동적 임계값 초과 여부
+	SpikeThresholdUs uint64 `json:"spike_threshold_us"` // 현재 임계값 (p99 × 3)
+}

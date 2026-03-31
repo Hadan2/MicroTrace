@@ -172,52 +172,83 @@ while (running) {
 
 ---
 
-## collector Go 파이프라인 (Phase 2 추가)
+## collector Go 파이프라인 (패키지 분리 후 현재 구조)
 
 ```
-go run main.go 실행
+sudo go run main.go
     │
-    │ exec.Command("sudo", "../agent/tcp_trace")
-    │ cmd.StdoutPipe() → stdout 파이프 연결
-    │ cmd.Stderr = os.Stderr → stderr 터미널에 표시
-    │ cmd.Start() → tcp_trace 자식 프로세스 실행
+    ├── hub.New() + go hub.Run()          WebSocket 허브 시작
+    ├── resolver.NewDockerResolver(ctx)   Docker API 캐시 초기화
+    ├── stats.New(resolver, hub.Broadcast) Processor 생성
+    ├── go proc.Run(eventCh)              이벤트 집계 goroutine 시작
+    ├── agent.New("../agent/tcp_trace")
+    │   └── cmd = exec.Command(binaryPath) sudo 없이 실행 (이미 root)
+    │   └── cmd.Start() → tcp_trace 자식 프로세스 실행
+    │   └── go func: stdout → eventCh   JSON 파싱 goroutine 시작
+    └── http.ListenAndServe(":9090")     WebSocket 서버 시작
+```
+
+### 이벤트 하나의 전체 여정
+
+```
+[tcp_trace 프로세스]
+  stdout: {"type":"rtt","daddr":"172.17.0.3","dport":8080,"latency_us":1234}
+    │
+    │ stdout 파이프
     ▼
-tcp_trace 가 JSON 출력할 때마다:
+[agent/reader.go]
+  scanner.Scan() → json.Unmarshal → model.Event{Type:"rtt", DAddr:"172.17.0.3", ...}
+    │
+    │ eventCh <- event
+    ▼
+[stats/stats.go] proc.Run()
+  handleEvent(e):
+    ├── resolver.Resolve("172.17.0.3") → "service-b"  (Docker API 캐시)
+    ├── RawEvent{Type:"rtt", SrcService:"unknown", DstService:"service-b", ...}
+    ├── broadcast(OutboundMsg{MsgType:"event", Event:&raw})  즉시 전송
+    └── connStats.addRTT(1234)  링버퍼에 추가
 
-    [tcp_trace stdout]
-        │
-        │ {"pid":87337,"comm":"curl","daddr":"142.251.119.102","dport":80}\n
-        │
-        │ stdout 파이프
-        ▼
-    scanner.Scan() [bufio.Scanner - 줄 단위로 읽음]
-    line = {"pid":87337,"comm":"curl","daddr":"142.251.119.102","dport":80}
-        │
-        ├─ json.Unmarshal([]byte(line), &e)
-        │      JSON 문자열 → Event 구조체로 변환
-        │      e.PID   = 87337
-        │      e.Comm  = "curl"
-        │      e.DAddr = "142.251.119.102"
-        │      e.DPort = 80
-        │
-        └─ handleEvent(e)
-               fmt.Printf(...)
-               터미널 출력  ← 나중에 WebSocket 전송으로 교체
+  1초 타이머마다:
+    ├── 링버퍼 복사 → 정렬 → p50/p95/p99 계산
+    ├── isSpike 판단
+    └── broadcast(OutboundMsg{MsgType:"stats", Stats:&snap})
+    │
+    │ hub.Broadcast()
+    ▼
+[hub/hub.go] Run()
+  json.Marshal(msg) → []byte
+    │
+    │ WebSocket
+    ▼
+[브라우저 localhost:9090]
+  msg.msg_type === "event" → 실시간 이벤트 로그 추가
+  msg.msg_type === "stats" → p50/p95/p99 통계판 업데이트
 ```
 
-### 프로세스 간 통로 정리
+### 패키지 구조와 역할
 
 ```
-[tcp_trace 프로세스]              [collector 프로세스]
-        │                                  │
-        │ stdout (JSON) ────파이프────▶   scanner.Scan()
-        │                                  │
-        │ stderr ────────연결──────▶      os.Stderr
-        │ "추적 시작..."                   터미널에 표시
+collector/
+  main.go          진입점, 각 패키지 조립만
+  model/event.go   공유 타입 (Event, OutboundMsg, StatSnapshot)
+  agent/reader.go  subprocess 실행 + stdout → chan model.Event
+  hub/hub.go       WebSocket 클라이언트 관리 + 브로드캐스트
+  resolver/        IP → 서비스명 변환
+    resolver.go    ServiceResolver 인터페이스
+                   DockerResolver (현재)
+                   StaticResolver (테스트/EC2용)
+  stats/stats.go   RTT 링버퍼 + p50/p95/p99 + spike 감지 + 1초 스냅샷
+```
 
-[커널 Ring Buffer]
-  커널 ──epoll──▶ tcp_trace 유저공간
-  (이벤트 시에만 깨어남, CPU 0%)
+### 실행 방법
+
+```bash
+# collector는 root 권한 필요 (eBPF attach)
+cd collector
+sudo go run main.go
+
+# 브라우저에서 확인
+# http://localhost:9090
 ```
 
 ---

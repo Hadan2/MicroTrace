@@ -237,6 +237,112 @@ docker compose version
 
 ---
 
+## Docker API (SDK) — 프로그램에서 Docker 제어하기
+
+Docker는 CLI(`docker ps`, `docker inspect` 등)뿐만 아니라 **REST API**를 제공합니다.
+Go 프로그램이 이 API를 직접 호출해서 컨테이너 정보를 가져올 수 있습니다.
+
+### 왜 MicroTrace에서 필요한가
+
+eBPF가 잡은 이벤트에는 IP 주소만 있습니다.
+
+```
+{"type":"rtt","daddr":"172.17.0.3","dport":8080}
+                  ↑
+       이게 어느 서비스인지 모름
+```
+
+Docker API로 `172.17.0.3` → `service-b` 로 변환해야 대시보드에서 의미 있는 정보를 보여줄 수 있습니다.
+
+### Docker 소켓 (/var/run/docker.sock)
+
+Docker 데몬과 통신하는 파일입니다.
+
+```
+Go 프로그램
+    │
+    │ HTTP 요청 (REST API)
+    ▼
+/var/run/docker.sock  ← Unix 도메인 소켓 (파일처럼 생긴 통신 채널)
+    │
+    ▼
+Docker 데몬 (dockerd)
+    │
+    ▼
+컨테이너 정보 반환
+```
+
+Docker Desktop이 실행 중일 때만 이 파일이 존재합니다. 없으면 "no such file or directory" 에러가 납니다.
+
+### Go에서 사용하는 방법
+
+```go
+import dockerclient "github.com/moby/moby/client"
+
+// 클라이언트 생성 (환경변수 DOCKER_HOST 자동 참조)
+cli, _ := dockerclient.NewClientWithOpts(
+    dockerclient.FromEnv,
+    dockerclient.WithAPIVersionNegotiation(),  // 서버 버전에 자동 맞춤
+)
+
+// 실행 중인 컨테이너 목록
+result, _ := cli.ContainerList(ctx, dockerclient.ContainerListOptions{})
+for _, c := range result.Items {
+    fmt.Println(c.Names[0])          // "/service-a"
+    for _, net := range c.NetworkSettings.Networks {
+        fmt.Println(net.IPAddress)   // netip.Addr 타입
+    }
+}
+
+// 특정 컨테이너 상세 정보
+info, _ := cli.ContainerInspect(ctx, containerID, dockerclient.ContainerInspectOptions{})
+fmt.Println(info.Container.Name)     // "/service-b"
+```
+
+### 이벤트 스트림으로 실시간 감지
+
+컨테이너가 새로 뜨거나 종료될 때마다 알림을 받을 수 있습니다.
+
+```go
+f := dockerclient.Filters{}.
+    Add("type", "container").
+    Add("event", "start").   // 컨테이너 시작
+    Add("event", "die")      // 컨테이너 종료
+
+result := cli.Events(ctx, dockerclient.EventsListOptions{Filters: f})
+
+for {
+    select {
+    case msg := <-result.Messages:
+        // msg.Action: "start" 또는 "die"
+        // msg.Actor.ID: 컨테이너 ID
+        // msg.Actor.Attributes["name"]: 컨테이너 이름
+    case err := <-result.Err:
+        // 에러 처리
+    }
+}
+```
+
+MicroTrace의 `DockerResolver`는 이 방식으로 IP 캐시를 실시간으로 유지합니다.
+
+### netip.Addr 타입
+
+신버전 Docker SDK에서 IP 주소가 `string` 대신 `netip.Addr` 타입으로 바뀌었습니다.
+
+```go
+// 구버전 (string)
+if net.IPAddress != "" { ... }
+
+// 신버전 (netip.Addr)
+if net.IPAddress.IsValid() {
+    ip := net.IPAddress.String()  // "172.17.0.3"
+}
+```
+
+`netip.Addr`는 Go 1.18에서 추가된 IP 주소 전용 값 타입입니다. 기존 `net.IP`(바이트 슬라이스)보다 메모리 효율이 좋고 비교 연산이 안전합니다.
+
+---
+
 ## 네트워크 (MicroTrace 관련)
 
 컨테이너끼리 통신할 때 Docker는 가상 네트워크를 만들어줌.

@@ -34,7 +34,7 @@ MicroTrace는 MSA 환경에서 1ms 미만의 지연 시간(Latency Spike)과 TCP
 - **프론트엔드/데스크톱:** Wails v2/v3 (Go + React/TS)
 - **환경:** Linux (Ubuntu 22.04+ / eBPF 활성화된 WSL2 커널)
 
-## 📚 학습 및 문서화 (핵심 지침)
+## 📚 학습 및 문서화 
 - **개념 우선:** 새로운 기능 구현 전, 반드시 관련 개념을 먼저 설명할 것
 - **Study 폴더:** 상세 개념 설명은 `Study/` 하위 주제별 파일에 작성 (ebpf.md, tcp.md, linux.md, go.md 등)
 - **STUDY.md 역할 축소:** `mdfiles/STUDY.md`는 구현 진행 상황을 간략히 기록하는 용도로만 사용
@@ -42,10 +42,39 @@ MicroTrace는 MSA 환경에서 1ms 미만의 지연 시간(Latency Spike)과 TCP
   - 관련 Study 파일 링크 (예: 자세한 내용은 `Study/ebpf.md` 참고)
   - 트러블슈팅 메모
 
-## 💻 코딩 스타일 및 규칙
+## 💻 코딩 스타일 및 규칙(핵심 지침)
 - **eBPF (C):** 리눅스 커널 코딩 스타일 준수. CO-RE(Compile Once – Run Everywhere) 방식 지향. eBPF 검증기(Verifier) 제약 조건을 고려한 메모리 안전성 확보.
 - **Backend (Go):** Idiomatic Go 스타일. 스트리밍 데이터 처리에 채널(Channel) 활용. 철저한 에러 처리.
 - **Frontend (TS/React):** 함수형 컴포넌트 사용. 고빈도 데이터 처리를 위한 성능 최적화(Canvas 등).
+- **철저한 모듈화 (구체 규칙):**
+  - **인터페이스로 변경 경계를 격리한다.**
+    단계별로 교체가 예정된 구현체는 반드시 인터페이스 뒤에 숨긴다.
+    예: `ServiceResolver` 인터페이스 → `DockerResolver` (1단계) / `StaticResolver` (2단계) / `K8sResolver` (3단계).
+    호출 측(stats, hub)은 인터페이스만 보고, 구현체가 무엇인지 몰라야 한다.
+  - **패키지는 역할 단위로 나눈다. 파일 단위가 아니다.**
+    `agent/` (subprocess 실행·읽기), `hub/` (WebSocket 관리), `stats/` (집계·spike 감지), `resolver/` (IP→이름), `model/` (공유 타입) 으로 분리.
+    기능이 추가될 때 기존 패키지 내부를 수정하지, 다른 패키지가 서로 침범하지 않는다.
+  - **공유 타입은 model/ 한 곳에만 정의한다.**
+    `Event`, `StatSnapshot`, WebSocket 메시지 구조체 등을 여러 패키지가 각자 정의하지 않는다.
+    구조체 필드가 바뀌면 `model/event.go` 한 파일만 수정하면 전파된다.
+  - **통신 방식(transport)을 비즈니스 로직과 분리한다.**
+    stats 집계 로직은 "어떻게 데이터가 오는지" 몰라야 한다. agent/reader가 파이프든 gRPC든 상관없이 `chan model.Event` 하나만 넘긴다.
+    나중에 gRPC로 바꿔도 stats, hub 코드는 건드리지 않아도 된다.
+  - **새 단계 추가 시 기존 코드를 고치지 않고 구현체를 추가하는 방향으로 설계한다.**
+    새 환경(EC2, k8s) 지원은 새 파일(resolver 구현체, reader 구현체)을 추가하는 것으로 끝나야 한다.
+
+## 🗺 단계별 변경 파일 지도
+
+단계가 올라갈 때 **어느 파일만 건드리면 되는지** 미리 정리해둔다.
+나머지 파일(stats, hub, model)은 어느 단계에서도 수정하지 않는다.
+
+| 변경 시점 | 건드리는 파일 | 건드리지 않는 파일 |
+|---|---|---|
+| **2단계: gRPC 전환** (EC2 멀티호스트) | `agent/reader.go` 만 교체 | stats, hub, model, resolver 전부 무관 |
+| **2단계: EC2 IP 매핑** | `resolver/` 에 `StaticResolver` 이미 구현됨. `main.go` 에서 선택만 변경 | stats, hub 무관 |
+| **3단계: k8s 지원** | `resolver/k8s_resolver.go` 파일 추가. `main.go` 에서 선택만 변경 | stats, hub 무관 |
+| **spike 임계값 조정** | `stats/stats.go` 의 `spikeMultiplier` 상수만 변경 | 나머지 전부 무관 |
+| **이벤트 필드 추가** (jitter, cwnd 등) | `model/event.go` + `agent/tcp_trace_common.h` 두 곳만 | 나머지는 새 필드를 그냥 통과시킴 |
 
 ## 📋 주요 명령어
 - **에이전트 빌드:** `make build-ebpf`

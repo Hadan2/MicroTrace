@@ -537,6 +537,165 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 ---
 
+## Go 인터페이스 (interface)
+
+> "이 메서드만 있으면 뭐든 OK" 라는 약속
+
+인터페이스는 구체적인 구현체를 몰라도 되도록 **약속(계약)** 만 정의합니다.
+
+```go
+// 약속: Resolve(ip) 메서드가 있으면 ServiceResolver로 쓸 수 있다
+type ServiceResolver interface {
+    Resolve(ip string) string
+}
+
+// 구현체 1: Docker API로 조회
+type DockerResolver struct { ... }
+func (r *DockerResolver) Resolve(ip string) string { ... }
+
+// 구현체 2: 설정 파일 기반 (EC2 환경)
+type StaticResolver struct { ... }
+func (r *StaticResolver) Resolve(ip string) string { ... }
+```
+
+### 왜 인터페이스를 쓰는가?
+
+```
+인터페이스 없이:
+  stats.go → DockerResolver 직접 사용
+  EC2 환경으로 바꿀 때 → stats.go 코드를 수정해야 함
+
+인터페이스 있으면:
+  stats.go → ServiceResolver (약속만 봄)
+  EC2 환경으로 바꿀 때 → main.go에서 어떤 구현체를 넘길지만 바꾸면 됨
+                          stats.go는 건드리지 않아도 됨
+```
+
+```go
+// stats.go: 인터페이스만 알고 있음
+type Processor struct {
+    resolver resolver.ServiceResolver  // DockerResolver인지 StaticResolver인지 모름
+}
+
+// main.go: 환경에 따라 구현체를 선택
+var r resolver.ServiceResolver
+if dockerAvailable {
+    r, _ = resolver.NewDockerResolver(ctx)
+} else {
+    r = resolver.NewStaticResolver(table)
+}
+proc := stats.New(r, ...)  // 어떤 구현체든 상관없이 넘김
+```
+
+Go에서는 인터페이스를 **명시적으로 선언하지 않아도** 됩니다. 메서드만 있으면 자동으로 인터페이스를 만족합니다.
+
+```go
+// Java: "implements ServiceResolver" 라고 명시해야 함
+// Go: Resolve() 메서드만 있으면 자동으로 ServiceResolver로 취급됨
+```
+
+---
+
+## 포인터 임베딩 + omitempty JSON 함정
+
+이번 구현에서 실제로 발생한 버그입니다.
+
+### 증상
+```go
+type OutboundMsg struct {
+    MsgType  string        `json:"msg_type"`
+    *RawEvent `json:",omitempty"`  // 포인터 임베딩
+}
+```
+
+`*RawEvent`의 필드들이 JSON에 인라인으로 펼쳐질 것을 기대했는데, 실제로는 **필드가 통째로 사라졌습니다.**
+
+브라우저에서 `msg.src_service`를 읽으면 `undefined`가 나왔습니다.
+
+### 원인
+
+Go의 JSON 직렬화 규칙:
+- 포인터 임베딩(`*RawEvent`) + `omitempty`가 붙으면, 포인터가 nil이 아니어도 내부 필드들이 인라인으로 펼쳐지지 않고 무시됩니다.
+- 이건 Go의 알려진 동작이지만 직관적이지 않아서 실수하기 쉽습니다.
+
+### 해결: 명시적 필드 사용
+
+```go
+// 잘못된 구조 (포인터 임베딩)
+type OutboundMsg struct {
+    MsgType   string        `json:"msg_type"`
+    *RawEvent  `json:",omitempty"`     // ← 내부 필드가 JSON에서 사라짐
+    *StatSnapshot `json:",omitempty"`
+}
+// 실제 JSON: {"msg_type":"event"}  ← src_service 등이 없음!
+
+// 올바른 구조 (명시적 필드)
+type OutboundMsg struct {
+    MsgType string        `json:"msg_type"`
+    Event   *RawEvent     `json:"event,omitempty"`    // ← 이름 있는 필드
+    Stats   *StatSnapshot `json:"stats,omitempty"`
+}
+// 실제 JSON: {"msg_type":"event","event":{"src_service":"unknown",...}}
+```
+
+클라이언트 JS에서는 `msg.event.src_service` 로 접근합니다.
+
+### 교훈
+
+Go에서 JSON 구조를 설계할 때:
+- 포인터 임베딩은 타입 단위로 인라인 펼치기에만 사용
+- `omitempty`와 포인터 임베딩을 함께 쓰면 예상치 못한 동작 발생
+- 불확실할 때는 명시적 필드가 항상 안전
+
+---
+
+## signal.NotifyContext (graceful shutdown)
+
+프로그램이 Ctrl+C나 `docker stop`으로 종료될 때, 실행 중인 작업을 깔끔하게 마무리하는 패턴입니다.
+
+```go
+import (
+    "context"
+    "os"
+    "os/signal"
+    "syscall"
+)
+
+// SIGINT(Ctrl+C), SIGTERM(docker stop) 수신 시 ctx가 자동으로 취소됨
+ctx, stop := signal.NotifyContext(context.Background(),
+    os.Interrupt,    // SIGINT  (Ctrl+C)
+    syscall.SIGTERM, // SIGTERM (kill 명령, docker stop)
+)
+defer stop()
+
+// goroutine들에게 ctx를 넘기면, 종료 신호가 오면 ctx.Done()이 닫힘
+go dockerResolver.watchEvents(ctx)  // ctx 취소 시 자동 종료
+go proc.Run(eventCh)
+
+// 종료 신호 올 때까지 대기
+<-ctx.Done()
+// 여기서부터 정리 작업
+srv.Shutdown(context.Background())
+```
+
+```
+Ctrl+C 누름
+    │
+    ▼
+signal.NotifyContext → ctx 취소
+    │
+    ├── watchEvents goroutine: ctx.Done() 감지 → return
+    ├── proc.Run goroutine: eventCh 닫힘 → return
+    └── main: <-ctx.Done() 통과 → srv.Shutdown() → 프로그램 종료
+```
+
+**graceful shutdown이 중요한 이유:**
+- eBPF 프로그램이 cgroup에 붙어있는 상태에서 갑자기 죽으면 hook이 그대로 남음
+- 다음 실행 시 "이미 attach됨" 에러 발생
+- 정상 종료해야 detach → cleanup이 실행됨
+
+---
+
 ## WriteMessage 동시성 주의
 
 `gorilla/websocket`의 `Conn`은 **동시에 WriteMessage를 호출하면 패닉** 이 납니다.
