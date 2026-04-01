@@ -66,7 +66,7 @@
 | **Agent (수집기)** | C, eBPF (libbpf) | sock_ops로 소켓 단위 TCP latency/재전송 감시. spike 감지 시 kprobe/uprobe 동적 활성화. |
 | **Collector (백엔드)** | Go (Goroutine, Channel) | 에이전트 이벤트를 고루틴/채널로 비동기 처리 후 WebSocket으로 실시간 스트리밍. |
 | **Database** | In-Memory Cache + Spike Log | 단기 버퍼링 및 통계 계산을 위한 인메모리 저장소. spike 이벤트는 파일로 덤프하여 소급 분석 지원. |
-| **Dashboard (클라이언트)** | Wails (Go + React/TS) | WebSocket으로 수신한 이벤트를 실시간 그래프로 시각화. |
+| **Dashboard (클라이언트)** | Wails (Go + React/TS) or Local React Web | WebSocket으로 수신한 이벤트를 실시간 그래프로 시각화. |
 
 ```
 [ 서비스 A ]  →  [ 서비스 B ]
