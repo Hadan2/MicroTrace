@@ -75,17 +75,84 @@ Study/
 - 루트 cgroup(/sys/fs/cgroup)에 수동 attach
 - 개념: `Study/kernel/ebpf.md` → sock_ops 섹션
 
-### 🔲 Go collector WebSocket 서버 추가
-- `collector/main.go`의 `handleEvent()` → WebSocket 브로드캐스트로 교체
-- 개념: `Study/network/websocket.md`, `Study/kernel/go.md` → select, sync.Mutex, context 섹션
+### ✅ Go collector WebSocket 서버 추가
+- `collector/main.go`의 `handleEvent()` → WebSocket 브로드캐스트로 교체 완료
+- DockerResolver로 IP → 컨테이너명 자동 매핑 완료
 - agent → collector 통신: JSON → 바이너리 직렬화로 교체 예정 (지표 확정 후)
+
+### 🔲 saddr(출발지 IP) 수집 추가
+- 현재 `src_service`가 "unknown" — 토폴로지 구성 불가
+- `tcp_trace_common.h` + `model/event.go` 에 `saddr` 필드 추가 필요
+- 추가 후: DockerResolver가 saddr도 서비스명으로 변환 → `service-a → service-b` 토폴로지 완성
+
+### 🔲 React Web 대시보드 구현
+- **프론트엔드 방향 확정: React Web (TypeScript)** — Wails 아님
+- 이유: 타겟 2(EC2), 타겟 3(K8s)에서 팀원 브라우저 접속 필요. Wails는 단일 머신 데스크톱 앱이라 불가.
+- WebSocket 연결 → StatSnapshot 수신 → 토폴로지 그래프 렌더링
+
+---
+
+## Phase 2 남은 작업 — 순서대로
+
+### Step 1: saddr 추가 🔲
+> 목표: src_service가 "unknown"에서 실제 서비스명으로 바뀌어야 토폴로지 구성 가능
+
+수정 파일:
+- `agent/tcp_trace_common.h` — `struct event`에 `saddr(__u32)` 필드 추가
+- `agent/tcp_trace.bpf.c` — `e->saddr = skops->local_ip4` 수집
+- `collector/model/event.go` — `Event` 구조체에 `SAddr string` 필드 추가
+- `collector/stats/stats.go` — `srcService = p.resolver.Resolve(e.SAddr)` 로 변경
+
+### Step 2: testenv 컨테이너화 🔲
+> 목표: service_a/b를 Docker 컨테이너로 올려야 DockerResolver가 IP→이름 매핑 가능
+
+현재 문제:
+- `service_a/main.go` 에 `localhost:8080` 하드코딩 → 컨테이너 간 통신 불가
+- `docker-compose.yml` 없음
+
+작업:
+- `testenv/service_a/Dockerfile` 신규 작성
+- `testenv/service_b/Dockerfile` 신규 작성
+- `testenv/docker-compose.yml` 신규 작성
+- `service_a/main.go`: `"http://localhost:8080"` → `"http://service-b:8080"` 변경
+
+컨테이너화 후 DockerResolver 동작:
+```
+Docker API 응답:
+  testenv-service-a-1 → 172.18.0.2
+  testenv-service-b-1 → 172.18.0.3
+
+cache:
+  "172.18.0.2" → "testenv-service-a-1"
+  "172.18.0.3" → "testenv-service-b-1"
+```
+
+### Step 3: 토폴로지 데이터 검증 🔲
+> 목표: React 개발 전에 데이터가 올바르게 나오는지 확인
+
+방법: 브라우저 콘솔에서 기존 HTML 임시 대시보드 WebSocket 메시지 확인
+```
+확인 항목:
+  src_service = "testenv-service-a-1"  (unknown 아님)
+  dst_service = "testenv-service-b-1"
+  p99_us, is_spike 등 StatSnapshot 필드 정상 여부
+```
+
+### Step 4: React Web 대시보드 구현 🔲
+> 목표: 검증된 데이터를 토폴로지로 시각화
+
+작업:
+- `frontend/` 디렉토리에 Vite + React + TypeScript 세팅
+- WebSocket 연결 + StatSnapshot 수신
+- 토폴로지 화면: 노드(서비스), 엣지(연결), 색상(레이턴시 수준) — ReactFlow 또는 D3.js
+- 상세 화면: 엣지 클릭 → RTT 시계열 그래프, P50/P95/P99, 재전송 횟수 — Recharts
 
 ---
 
 ## Phase 3 - 동적 kprobe 활성화 + 대시보드 🔲 미착수
 
 - spike 감지 시 kprobe 자동 활성화 (tcp_transmit_skb, finish_task_switch, vfs_write)
-- Wails + React 대시보드 (실시간 latency 그래프, p50/p95/p99)
+- React Web 대시보드 상세 화면 (실시간 latency 그래프, p50/p95/p99)
 
 ---
 

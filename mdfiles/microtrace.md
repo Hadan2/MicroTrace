@@ -66,7 +66,7 @@
 | **Agent (수집기)** | C, eBPF (libbpf) | sock_ops로 소켓 단위 TCP latency/재전송 감시. spike 감지 시 kprobe/uprobe 동적 활성화. |
 | **Collector (백엔드)** | Go (Goroutine, Channel) | 에이전트 이벤트를 고루틴/채널로 비동기 처리 후 WebSocket으로 실시간 스트리밍. |
 | **Database** | In-Memory Cache + Spike Log | 단기 버퍼링 및 통계 계산을 위한 인메모리 저장소. spike 이벤트는 파일로 덤프하여 소급 분석 지원. |
-| **Dashboard (클라이언트)** | Wails (Go + React/TS) or Local React Web | WebSocket으로 수신한 이벤트를 실시간 그래프로 시각화. |
+| **Dashboard (클라이언트)** | React Web (TypeScript) | WebSocket으로 수신한 이벤트를 실시간 그래프로 시각화. 브라우저만 있으면 로컬/EC2/K8s 모든 환경에서 접속 가능. |
 
 ```
 [ 서비스 A ]  →  [ 서비스 B ]
@@ -95,7 +95,7 @@
 |---|---|
 | **C + libbpf (CO-RE)** | BCC 대비 런타임 의존성 제거, 배포 용이성 확보 |
 | **Go Collector** | goroutine/channel 기반 비동기 처리가 이벤트 스트리밍에 최적. 크로스 컴파일 용이 |
-| **Wails (Go + React)** | Electron 대비 메모리 사용량 1/10 수준. Go 백엔드와 단일 언어 생태계 유지 |
+| **React Web (TypeScript)** | 브라우저만 있으면 로컬/EC2/K8s 모든 환경에서 URL 하나로 접속 가능. Wails는 데스크톱 앱이라 다중 서버 환경에서 팀원 공유가 불가능하고, 서버 배포 시 SSH 터널링이 필요해 타겟 2·3 환경과 맞지 않음. |
 | **인메모리 + 파일 덤프** | TSDB(InfluxDB 등) 의존성 제거로 설치 복잡도 최소화. spike 이벤트만 선별 저장 |
 
 ---
@@ -227,10 +227,12 @@ sock_ops 방식:
 - spike 감지 시 kprobe 자동 활성화
   - tcp_transmit_skb, finish_task_switch, vfs_write
   - 커널 레벨 원인 후보 자동 판별
-- Wails + React 대시보드 구현
-  - 실시간 latency 그래프
+- React Web 대시보드 구현
+  - 서비스 토폴로지 화면 (노드: 서비스, 엣지: 연결, 색상: 레이턴시 수준)
+  - 실시간 latency 그래프 (RTT 시계열)
   - p50 / p95 / p99 latency
   - spike timeline + 원인 표시
+  - 엣지/노드 클릭 → 상세 화면 (RTT 그래프, 재전송 횟수)
 - NFR 목표 수치 실측 및 기획서 업데이트
 
 ---

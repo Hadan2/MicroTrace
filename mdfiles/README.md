@@ -54,12 +54,15 @@
 |---|---|---|
 | 커널/시스템 | C, eBPF (libbpf), sock_ops, kprobe, uprobe | tc/netem, nsenter, netlink |
 | 백엔드 | Go (Goroutine, Channel, WebSocket) | Go (Docker API, REST API) |
-| 프론트엔드 | Wails (Go + React/TypeScript) | Web UI (React) |
+| 프론트엔드 | React Web (TypeScript) | Web UI (React) |
 | 인프라 | Docker, cgroup v2 | Docker API, Network Namespace |
 
 ---
 
-## 웹 UI 구조 설계
+## React Web 대시보드 구조 설계
+
+> **프론트엔드 방향: React Web (TypeScript) 확정.**
+> Wails(데스크톱 앱)는 로컬 단일 머신에서만 동작하므로, EC2 멀티 호스트·K8s 환경에서 팀원이 브라우저로 접속할 수 없음. React Web은 URL 하나로 모든 환경에서 공유 가능.
 
 사용자가 자신의 마이크로서비스에 MicroTrace를 올리면, 전체 서비스 토폴로지를 시각화하고 병목 구간을 색상/화살표로 표시합니다. 특정 노드나 엣지를 클릭하면 상세 분석 화면으로 진입합니다.
 

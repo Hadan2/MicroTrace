@@ -31,7 +31,7 @@ MicroTrace는 MSA 환경에서 1ms 미만의 지연 시간(Latency Spike)과 TCP
 ## 🛠 기술 스택
 - **커널/에이전트:** C, eBPF (libbpf / cilium/ebpf 사용)
 - **백엔드:** Go (Goroutines, gRPC/IPC 기반 스트리밍)
-- **프론트엔드/데스크톱:** Wails v2/v3 (Go + React/TS)
+- **프론트엔드:** React Web (TypeScript) — Wails 아님. 브라우저로 접속하는 웹 UI. 로컬/EC2/K8s 모든 환경에서 URL 하나로 공유 가능.
 - **환경:** Linux (Ubuntu 22.04+ / eBPF 활성화된 WSL2 커널)
 
 ## 📚 학습 및 문서화 
@@ -79,5 +79,5 @@ MicroTrace는 MSA 환경에서 1ms 미만의 지연 시간(Latency Spike)과 TCP
 ## 📋 주요 명령어
 - **에이전트 빌드:** `make build-ebpf`
 - **백엔드 실행:** `go run main.go`
-- **Wails 개발 모드:** `wails dev`
+- **프론트엔드 개발 서버:** `npm run dev` (React Web, Vite 기반)
 
