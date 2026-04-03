@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const target = "http://localhost:8080/ping"
+const target = "http://service-b:8080/ping"
 
 func main() {
 	// DisableKeepAlives: true → 매 요청마다 새 TCP 연결

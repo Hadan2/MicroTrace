@@ -1,0 +1,12 @@
+services:
+  service-a:
+    build:
+      context: .
+      dockerfile: service_a/Dockerfile
+    depends_on:
+      - service-b
+
+  service-b:
+    build:
+      context: .
+      dockerfile: service_b/Dockerfile

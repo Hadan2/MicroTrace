@@ -1,6 +1,6 @@
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
-COPY ../go.mod .
+COPY go.mod .
 COPY service_a/main.go .
 RUN go build -o service_a main.go
 
