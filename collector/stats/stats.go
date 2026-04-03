@@ -36,9 +36,9 @@ const (
 
 // ConnKey — 연결을 식별하는 키 (출발지 서비스 → 목적지 서비스)
 //
-// 현재는 src가 항상 "" (sock_ops는 local_port만 알고 서비스명은 모름)
-// resolver가 daddr만 서비스 이름으로 변환 가능하기 때문.
-// Phase 2에서 src 매핑 방법이 생기면 여기만 바꾸면 된다.
+// saddr(skops->local_ip4) 수집 후 resolver가 양쪽 모두 서비스명으로 변환한다.
+// Docker Compose: "testenv-service-a-1" → "testenv-service-b-1"
+// 매핑 실패 시(캐시 미스): IP 문자열 그대로 사용
 type ConnKey struct {
 	Src string
 	Dst string
@@ -172,8 +172,7 @@ func (p *Processor) Run(eventCh <-chan model.Event) {
 // 3. RTT/retransmit 이벤트면 링버퍼에 추가
 func (p *Processor) handleEvent(e model.Event) {
 	dstService := p.resolver.Resolve(e.DAddr)
-	// src는 현재 알 수 없음 (sock_ops 제한) → "unknown" 표시
-	srcService := "unknown"
+	srcService := p.resolver.Resolve(e.SAddr)
 
 	// 실시간 이벤트를 즉시 클라이언트로 전달
 	raw := model.RawEvent{

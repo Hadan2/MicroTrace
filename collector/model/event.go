@@ -17,6 +17,7 @@ type Event struct {
 	Type      string `json:"type"`        // "connect" | "rtt" | "retransmit"
 	PID       uint32 `json:"pid"`         // sock_ops 제한으로 local_port 대체 사용
 	Comm      string `json:"comm"`        // 프로세스 이름 (sock_ops에선 항상 빈 문자열)
+	SAddr     string `json:"saddr"`       // 출발지 IPv4 문자열 — 이 소켓이 속한 컨테이너 IP
 	DAddr     string `json:"daddr"`       // 목적지 IPv4 문자열 (예: "172.17.0.3")
 	DPort     uint16 `json:"dport"`       // 목적지 포트
 	LatencyUs uint64 `json:"latency_us"`  // RTT (마이크로초). retransmit 이벤트에서는 0

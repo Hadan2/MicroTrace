@@ -28,16 +28,18 @@
 // 메모리 레이아웃:
 //   latency_us [8바이트]  ← CONNECT/RTT: RTT(마이크로초), RETRANSMIT: 0
 //   pid        [4바이트]  ← sock_ops는 pid 불가 → local_port로 대체
+//   saddr      [4바이트]  ← 출발지 IPv4 (skops->local_ip4, big-endian)
 //   daddr      [4바이트]  ← 목적지 IPv4 (big-endian, inet_ntoa로 변환해서 출력)
 //   dport      [2바이트]
 //   type       [1바이트]  ← EVENT_TYPE_CONNECT / RTT / RETRANSMIT
 //   pad        [1바이트]  ← 명시적 패딩 (comm을 8바이트 경계에 정렬)
 //   comm       [16바이트] ← 프로그램 이름 (bpf_get_current_comm이 최대 16바이트)
-//   합계: 36바이트, 컴파일러 자동 패딩 없음
+//   합계: 40바이트, 컴파일러 자동 패딩 없음
 // ─────────────────────────────────────────────
 struct event {
     __u64 latency_us;   // RTT (마이크로초). CONNECT 이벤트에서만 유효
-    __u32 pid;          // 프로세스 ID
+    __u32 pid;          // 프로세스 ID (실제로는 local_port)
+    __u32 saddr;        // 출발지 IPv4 주소 (big-endian) — 이 소켓이 속한 컨테이너 IP
     __u32 daddr;        // 목적지 IPv4 주소 (big-endian)
     __u16 dport;        // 목적지 포트
     __u8  type;         // 이벤트 타입 (EVENT_TYPE_CONNECT or EVENT_TYPE_RETRANSMIT)

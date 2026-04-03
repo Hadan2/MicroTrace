@@ -47,19 +47,25 @@ static void handle_signal(int sig)
 // ─────────────────────────────────────────────
 static void output_event(const struct event *e)
 {
-    // e->daddr: big-endian 32비트 IP → "192.168.1.1" 형식 문자열로 변환
-    struct in_addr ip_addr = { .s_addr = e->daddr };
-    char *ip_str = inet_ntoa(ip_addr);
+    // saddr/daddr: big-endian 32비트 IP → "192.168.1.1" 형식 문자열로 변환
+    // inet_ntoa()는 정적 버퍼를 재사용하므로 saddr을 먼저 복사해둬야 함
+    struct in_addr sip = { .s_addr = e->saddr };
+    char saddr_str[16];
+    // inet_ntoa 정적 버퍼 덮어쓰기 방지: saddr 변환 결과를 별도 버퍼에 복사
+    snprintf(saddr_str, sizeof(saddr_str), "%s", inet_ntoa(sip));
+
+    struct in_addr dip = { .s_addr = e->daddr };
+    char *daddr_str = inet_ntoa(dip);
 
     if (e->type == EVENT_TYPE_RETRANSMIT) {
-        printf("{\"type\":\"retransmit\",\"pid\":%u,\"comm\":\"%s\",\"daddr\":\"%s\",\"dport\":%u}\n",
-               e->pid, e->comm, ip_str, e->dport);
+        printf("{\"type\":\"retransmit\",\"pid\":%u,\"comm\":\"%s\",\"saddr\":\"%s\",\"daddr\":\"%s\",\"dport\":%u}\n",
+               e->pid, e->comm, saddr_str, daddr_str, e->dport);
     } else if (e->type == EVENT_TYPE_RTT) {
-        printf("{\"type\":\"rtt\",\"pid\":%u,\"comm\":\"%s\",\"daddr\":\"%s\",\"dport\":%u,\"latency_us\":%llu}\n",
-               e->pid, e->comm, ip_str, e->dport, e->latency_us);
+        printf("{\"type\":\"rtt\",\"pid\":%u,\"comm\":\"%s\",\"saddr\":\"%s\",\"daddr\":\"%s\",\"dport\":%u,\"latency_us\":%llu}\n",
+               e->pid, e->comm, saddr_str, daddr_str, e->dport, e->latency_us);
     } else {
-        printf("{\"type\":\"connect\",\"pid\":%u,\"comm\":\"%s\",\"daddr\":\"%s\",\"dport\":%u,\"latency_us\":%llu}\n",
-               e->pid, e->comm, ip_str, e->dport, e->latency_us);
+        printf("{\"type\":\"connect\",\"pid\":%u,\"comm\":\"%s\",\"saddr\":\"%s\",\"daddr\":\"%s\",\"dport\":%u,\"latency_us\":%llu}\n",
+               e->pid, e->comm, saddr_str, daddr_str, e->dport, e->latency_us);
     }
     // stdout 버퍼를 즉시 비움 - 이벤트가 Go collector에 실시간으로 전달되도록
     fflush(stdout);

@@ -43,6 +43,9 @@ static __always_inline void fill_event(struct event *e, struct bpf_sock_ops *sko
     // sock_ops는 pid 접근 불가 → local_port로 소켓 식별
     // local_port: 호스트 바이트 오더로 저장됨 (변환 불필요)
     e->pid        = skops->local_port;
+    // local_ip4: 이 소켓의 출발지 IP (컨테이너 자신의 IP)
+    // DockerResolver가 이 IP를 컨테이너 이름으로 변환해 src_service를 채움
+    e->saddr      = skops->local_ip4;
     e->daddr      = skops->remote_ip4;
     // remote_port: (port << 16) 형태로 저장됨 (big-endian 상위 16비트)
     // >> 16 으로 포트를 하위 16비트로 내린 뒤, bpf_ntohs()로 바이트 오더 변환
