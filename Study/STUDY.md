@@ -100,11 +100,16 @@ Study/
 - P50/P95/P99 퍼센타일 집계 정상 출력
 - 참고: 루트 cgroup 특성상 호스트 외부 트래픽도 같이 잡힘 → 나중에 Docker 네트워크 필터링으로 제거 가능
 
-### 🔲 Step 4: React Web 대시보드 구현
-- `frontend/` 디렉토리에 Vite + React + TypeScript 세팅
-- WebSocket 연결 + StatSnapshot 수신
-- 토폴로지 화면: 노드(서비스), 엣지(연결), 색상(레이턴시 수준) — ReactFlow 또는 D3.js
-- 상세 화면: 엣지 클릭 → RTT 시계열 그래프, P50/P95/P99, 재전송 횟수 — Recharts
+### ✅ [2026-04-09] Step 4: React Web 대시보드 구현
+- Vite + React + TypeScript + Tailwind CSS + ReactFlow + Recharts 세팅
+- WebSocket 연결 + StatSnapshot 실시간 수신 (`useWebSocket` 훅)
+- 토폴로지 화면: 노드(서비스), 엣지(연결), 색상(레이턴시 수준) — ReactFlow
+- 레이아웃: 상단 그래프 패널 / 하단 토폴로지 (가로 분할)
+- 엣지 클릭 → 상단 패널에 P50/P95/P99 실시간 시계열 그래프 (최근 60초, Recharts)
+- spike threshold 기준선 표시
+- 트러블슈팅: `StrictMode` 제거 → WebSocket 이중 연결 문제 해결
+- 트러블슈팅: `vite.config.ts`에 `host: true` 추가 → WSL2 외부 접근 가능
+- 상세: `Study/Errors/04.09_errors.md`
 
 ---
 

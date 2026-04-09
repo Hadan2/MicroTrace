@@ -90,7 +90,7 @@ export default function TopologyGraph({ snapshots, onEdgeSelect }: Props) {
           source: snap.src_service,
           target: snap.dst_service,
           animated: snap.is_spike,
-          label: formatLatency(snap.p99_us),
+          label: formatLatency(snap.p50_us),
           labelStyle: { fill: color, fontSize: 12, fontWeight: 600 },
           style: { stroke: color, strokeWidth: snap.is_spike ? 3 : 2 },
           markerEnd: { type: 'arrowclosed' as any, color },

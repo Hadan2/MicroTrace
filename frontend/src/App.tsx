@@ -2,16 +2,16 @@ import { useState } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { useWebSocket } from './hooks/useWebSocket'
 import TopologyGraph from './components/TopologyGraph'
-import DetailPanel from './components/DetailPanel'
+import LatencyChart from './components/LatencyChart'
 
 const WS_URL = `ws://${window.location.hostname}:9090/ws`
 
 export default function App() {
-  const { snapshots, connected } = useWebSocket(WS_URL)
+  const { snapshots, history, connected } = useWebSocket(WS_URL)
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
 
-  // 항상 snapshots에서 최신값을 읽음 — 클릭 시점의 스냅샷에 고정되지 않음
-  const selected = selectedKey ? (snapshots[selectedKey] ?? null) : null
+  const selectedSnap = selectedKey ? (snapshots[selectedKey] ?? null) : null
+  const selectedHistory = selectedKey ? (history[selectedKey] ?? []) : []
 
   return (
     <div className="flex flex-col w-screen h-screen bg-[#0f1117]">
@@ -26,25 +26,26 @@ export default function App() {
         </div>
       </header>
 
-      {/* 메인 */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* 토폴로지 */}
-        <div className="flex-1">
-          {Object.keys(snapshots).length === 0 ? (
-            <div className="h-full flex items-center justify-center text-slate-500 text-sm">
-              {connected ? '트래픽 대기 중...' : 'collector에 연결 중...'}
-            </div>
-          ) : (
-            <ReactFlowProvider>
-              <TopologyGraph snapshots={snapshots} onEdgeSelect={setSelectedKey} />
-            </ReactFlowProvider>
-          )}
-        </div>
+      {/* 상단: 그래프 패널 */}
+      <div className="h-56 border-b border-slate-700/60 shrink-0">
+        <LatencyChart
+          historyKey={selectedKey}
+          history={selectedHistory}
+          snap={selectedSnap}
+        />
+      </div>
 
-        {/* 우측 상세 패널 */}
-        <aside className="w-72 border-l border-slate-700/60 shrink-0 overflow-y-auto">
-          <DetailPanel snap={selected} />
-        </aside>
+      {/* 하단: 토폴로지 */}
+      <div className="flex-1 overflow-hidden">
+        {Object.keys(snapshots).length === 0 ? (
+          <div className="h-full flex items-center justify-center text-slate-500 text-sm">
+            {connected ? '트래픽 대기 중...' : 'collector에 연결 중...'}
+          </div>
+        ) : (
+          <ReactFlowProvider>
+            <TopologyGraph snapshots={snapshots} onEdgeSelect={setSelectedKey} />
+          </ReactFlowProvider>
+        )}
       </div>
     </div>
   )
