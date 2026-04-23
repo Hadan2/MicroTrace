@@ -37,6 +37,7 @@ export function useWebSocket(url: string) {
 
       ws.onmessage = (e) => {
         const msg: OutboundMsg = JSON.parse(e.data)
+
         if (msg.msg_type === 'stats' && msg.stats) {
           const snap = msg.stats
           const key = `${snap.src_service}→${snap.dst_service}`
@@ -53,6 +54,18 @@ export function useWebSocket(url: string) {
             }
             const updated = [...existing, point].slice(-MAX_HISTORY)
             return { ...prev, [key]: updated }
+          })
+        } else if (msg.msg_type === 'remove' && msg.remove_key) {
+          const key = msg.remove_key
+          setSnapshots(prev => {
+            const next = { ...prev }
+            delete next[key]
+            return next
+          })
+          setHistory(prev => {
+            const next = { ...prev }
+            delete next[key]
+            return next
           })
         }
       }

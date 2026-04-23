@@ -46,6 +46,8 @@ func main() {
 	go h.Run()
 
 	// ── 3. Resolver 시작 ───────────────────────────────────────────────
+	// DockerResolver: 내부 컨테이너 IP → 컨테이너명
+	// EnrichResolver: DockerResolver가 모르는 외부 IP → rDNS 도메인명
 	// Docker API 연결 실패 시 StaticResolver로 대체 (IP 그대로 표시)
 	var svcResolver resolver.ServiceResolver
 	dockerResolver, err := resolver.NewDockerResolver(ctx)
@@ -53,7 +55,7 @@ func main() {
 		log.Printf("[main] DockerResolver 초기화 실패, StaticResolver로 대체: %v", err)
 		svcResolver = resolver.NewStaticResolver(nil)
 	} else {
-		svcResolver = dockerResolver
+		svcResolver = resolver.NewEnrichResolver(dockerResolver)
 	}
 
 	// ── 4. Processor 시작 ──────────────────────────────────────────────

@@ -41,13 +41,16 @@ type Event struct {
 // 인라인으로 펼쳐지지 않고 통째로 생략되는 버그가 있다.
 // 명시적 필드를 쓰면 항상 예측 가능한 JSON 구조가 보장된다.
 type OutboundMsg struct {
-	MsgType string `json:"msg_type"` // "event" | "stats"
+	MsgType string `json:"msg_type"` // "event" | "stats" | "remove"
 
 	// MsgType == "event" 일 때 채워진다. 나머지는 null.
 	Event *RawEvent `json:"event,omitempty"`
 
 	// MsgType == "stats" 일 때 채워진다. 나머지는 null.
 	Stats *StatSnapshot `json:"stats,omitempty"`
+
+	// MsgType == "remove" 일 때 채워진다. 프론트에서 해당 key를 삭제한다.
+	RemoveKey string `json:"remove_key,omitempty"` // "src→dst" 형식
 }
 
 // RawEvent — Event 에 서비스 이름(resolver 결과)을 붙인 실시간 이벤트
@@ -66,11 +69,13 @@ type RawEvent struct {
 type StatSnapshot struct {
 	SrcService      string  `json:"src_service"`
 	DstService      string  `json:"dst_service"`
+	SrcType         string  `json:"src_type"`           // "internal" | "external"
+	DstType         string  `json:"dst_type"`           // "internal" | "external"
 	P50Us           uint64  `json:"p50_us"`
 	P95Us           uint64  `json:"p95_us"`
 	P99Us           uint64  `json:"p99_us"`
 	RetransmitCount uint32  `json:"retransmit_count"`
-	SampleCount     int     `json:"sample_count"`     // 이번 1초 구간 RTT 샘플 수
-	IsSpike         bool    `json:"is_spike"`          // 최근 RTT가 동적 임계값 초과 여부
+	SampleCount     int     `json:"sample_count"`       // 이번 1초 구간 RTT 샘플 수
+	IsSpike         bool    `json:"is_spike"`           // 최근 RTT가 동적 임계값 초과 여부
 	SpikeThresholdUs uint64 `json:"spike_threshold_us"` // 현재 임계값 (p99 × 3)
 }

@@ -30,7 +30,7 @@ function formatTime(ts: number): string {
 export default function LatencyChart({ historyKey, history, snap }: Props) {
   if (!historyKey || history.length === 0) {
     return (
-      <div className="h-full flex items-center justify-center text-slate-500 text-sm">
+      <div className="h-full flex items-center justify-center text-slate-400 text-sm">
         토폴로지에서 엣지를 클릭하면 그래프가 표시됩니다
       </div>
     )
@@ -43,9 +43,9 @@ export default function LatencyChart({ historyKey, history, snap }: Props) {
       {/* 헤더 */}
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-slate-100 font-semibold text-sm">{historyKey}</span>
+          <span className="text-slate-800 font-semibold text-sm">{historyKey}</span>
           {snap?.is_spike && (
-            <span className="text-xs bg-red-900/50 border border-red-500/50 text-red-400 px-2 py-0.5 rounded-full">
+            <span className="text-xs bg-red-50 border border-red-300 text-red-600 px-2 py-0.5 rounded-full">
               ⚠ SPIKE
             </span>
           )}
@@ -74,26 +74,26 @@ export default function LatencyChart({ historyKey, history, snap }: Props) {
             <XAxis
               dataKey="time"
               tickFormatter={formatTime}
-              tick={{ fill: '#64748b', fontSize: 11 }}
-              axisLine={{ stroke: '#334155' }}
+              tick={{ fill: '#94a3b8', fontSize: 11 }}
+              axisLine={{ stroke: '#e2e8f0' }}
               tickLine={false}
               minTickGap={40}
             />
             <YAxis
               tickFormatter={formatUs}
-              tick={{ fill: '#64748b', fontSize: 11 }}
+              tick={{ fill: '#94a3b8', fontSize: 11 }}
               axisLine={false}
               tickLine={false}
               width={52}
             />
             <Tooltip
-              contentStyle={{ background: '#1e2130', border: '1px solid #334155', borderRadius: 6 }}
-              labelStyle={{ color: '#94a3b8', fontSize: 11 }}
+              contentStyle={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: 6, boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}
+              labelStyle={{ color: '#64748b', fontSize: 11 }}
               labelFormatter={(v) => formatTime(v as number)}
               formatter={(value: number) => [formatUs(value), '']}
             />
             <Legend
-              wrapperStyle={{ fontSize: 11, color: '#64748b' }}
+              wrapperStyle={{ fontSize: 11, color: '#94a3b8' }}
             />
             {spikeThreshold && (
               <ReferenceLine

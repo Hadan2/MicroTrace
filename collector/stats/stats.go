@@ -32,6 +32,13 @@ const (
 
 	// snapshotInterval — StatSnapshot을 hub로 보내는 주기
 	snapshotInterval = 1 * time.Second
+
+	// connTTL — 마지막 이벤트로부터 이 시간이 지나면 connStats를 삭제한다.
+	// 끊긴 연결 노드가 토폴로지에서 자동으로 사라지는 시간.
+	connTTL = 30 * time.Second
+
+	// ttlSweepInterval — TTL 만료 연결을 정리하는 주기
+	ttlSweepInterval = 10 * time.Second
 )
 
 // ConnKey — 연결을 식별하는 키 (출발지 서비스 → 목적지 서비스)
@@ -44,6 +51,14 @@ type ConnKey struct {
 	Dst string
 }
 
+// nodeType — resolver 결과가 원본 IP와 같으면 외부, 다르면 내부 컨테이너
+func nodeType(ip, resolved string) string {
+	if ip == resolved {
+		return "external"
+	}
+	return "internal"
+}
+
 // connStats — 연결 하나의 RTT 링버퍼와 집계 상태
 type connStats struct {
 	// 링버퍼: 최근 rttRingSize 개의 RTT(마이크로초)를 원형으로 덮어쓴다.
@@ -52,7 +67,10 @@ type connStats struct {
 	head  int  // 다음에 쓸 인덱스
 	count int  // 현재 저장된 샘플 수 (최대 rttRingSize)
 
-	retransmit uint32 // 누적 재전송 횟수
+	retransmit uint32    // 누적 재전송 횟수
+	lastSeen   time.Time // 마지막 이벤트 수신 시각 (TTL 계산용)
+	srcType    string    // "internal" | "external"
+	dstType    string    // "internal" | "external"
 }
 
 // addRTT — 새 RTT를 링버퍼에 추가한다.
@@ -146,7 +164,9 @@ func New(r resolver.ServiceResolver, fn BroadcastFn) *Processor {
 // eventCh가 닫히면 (agent 종료 시) 루프를 빠져나온다.
 func (p *Processor) Run(eventCh <-chan model.Event) {
 	ticker := time.NewTicker(snapshotInterval)
+	sweeper := time.NewTicker(ttlSweepInterval)
 	defer ticker.Stop()
+	defer sweeper.Stop()
 
 	for {
 		select {
@@ -161,6 +181,9 @@ func (p *Processor) Run(eventCh <-chan model.Event) {
 
 		case <-ticker.C:
 			p.publishSnapshots()
+
+		case <-sweeper.C:
+			p.sweepExpired()
 		}
 	}
 }
@@ -190,6 +213,9 @@ func (p *Processor) handleEvent(e model.Event) {
 	p.mu.Lock()
 	cs := p.getOrCreate(key)
 
+	cs.srcType = nodeType(e.SAddr, srcService)
+	cs.dstType = nodeType(e.DAddr, dstService)
+	cs.lastSeen = time.Now()
 	switch e.Type {
 	case "connect", "rtt":
 		if e.LatencyUs > 0 {
@@ -229,6 +255,8 @@ func (p *Processor) publishSnapshots() {
 		snap := model.StatSnapshot{
 			SrcService:       e.key.Src,
 			DstService:       e.key.Dst,
+			SrcType:          e.cs.srcType,
+			DstType:          e.cs.dstType,
 			P50Us:            p50,
 			P95Us:            p95,
 			P99Us:            p99,
@@ -253,8 +281,31 @@ func (p *Processor) getOrCreate(key ConnKey) *connStats {
 	if cs, ok := p.conns[key]; ok {
 		return cs
 	}
-	cs := &connStats{}
+	cs := &connStats{lastSeen: time.Now()}
 	p.conns[key] = cs
 	log.Printf("[stats] 새 연결 추적 시작: %s → %s", key.Src, key.Dst)
 	return cs
+}
+
+// sweepExpired — lastSeen이 connTTL을 초과한 연결을 삭제하고
+// 프론트엔드에 "remove" 메시지를 전송해서 노드/엣지를 제거한다.
+func (p *Processor) sweepExpired() {
+	now := time.Now()
+	p.mu.Lock()
+	var expired []ConnKey
+	for key, cs := range p.conns {
+		if now.Sub(cs.lastSeen) > connTTL {
+			expired = append(expired, key)
+			delete(p.conns, key)
+		}
+	}
+	p.mu.Unlock()
+
+	for _, key := range expired {
+		log.Printf("[stats] TTL 만료 → 연결 제거: %s → %s", key.Src, key.Dst)
+		p.broadcast(model.OutboundMsg{
+			MsgType:   "remove",
+			RemoveKey: key.Src + "→" + key.Dst,
+		})
+	}
 }
