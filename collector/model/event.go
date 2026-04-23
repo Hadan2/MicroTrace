@@ -23,17 +23,21 @@ type Event struct {
 	LatencyUs uint64 `json:"latency_us"`  // RTT (마이크로초). retransmit 이벤트에서는 0
 }
 
-// ─────────────────────────────────────────────
-// OutboundMsg — WebSocket을 통해 클라이언트로 나가는 모든 메시지의 봉투(envelope)
-//
-// msg_type 필드로 클라이언트가 메시지 종류를 구분한다.
-//   "event"   → RawEvent 필드 사용
-//   "stats"   → StatSnapshot 필드 사용
-//
-// 두 종류를 하나의 타입으로 묶은 이유:
-//   hub.Broadcast()가 단일 타입만 받으면 되고,
-//   클라이언트 JS도 switch(msg.msg_type) 하나로 처리 가능.
-// ─────────────────────────────────────────────
+// HistoryPoint — 1초 단위 시계열 포인트 (collector가 보관, 신규 클라이언트에게 전송)
+type HistoryPoint struct {
+	Time  int64  `json:"time"`   // Unix millisecond
+	AvgUs uint64 `json:"avg_us"`
+	P50Us uint64 `json:"p50_us"`
+	P95Us uint64 `json:"p95_us"`
+	P99Us uint64 `json:"p99_us"`
+}
+
+// ConnHistory — 연결 하나의 전체 히스토리 (신규 클라이언트 전송용)
+type ConnHistory struct {
+	Key    string         `json:"key"`
+	Points []HistoryPoint `json:"points"`
+}
+
 // OutboundMsg — WebSocket을 통해 클라이언트로 나가는 모든 메시지의 봉투(envelope)
 //
 // 포인터 임베딩 대신 명시적 필드를 사용한다.
@@ -41,16 +45,14 @@ type Event struct {
 // 인라인으로 펼쳐지지 않고 통째로 생략되는 버그가 있다.
 // 명시적 필드를 쓰면 항상 예측 가능한 JSON 구조가 보장된다.
 type OutboundMsg struct {
-	MsgType string `json:"msg_type"` // "event" | "stats" | "remove"
+	MsgType string `json:"msg_type"` // "event" | "stats" | "remove" | "history"
 
-	// MsgType == "event" 일 때 채워진다. 나머지는 null.
-	Event *RawEvent `json:"event,omitempty"`
+	Event     *RawEvent    `json:"event,omitempty"`
+	Stats     *StatSnapshot `json:"stats,omitempty"`
+	RemoveKey string        `json:"remove_key,omitempty"`
 
-	// MsgType == "stats" 일 때 채워진다. 나머지는 null.
-	Stats *StatSnapshot `json:"stats,omitempty"`
-
-	// MsgType == "remove" 일 때 채워진다. 프론트에서 해당 key를 삭제한다.
-	RemoveKey string `json:"remove_key,omitempty"` // "src→dst" 형식
+	// MsgType == "history" 일 때 채워진다. 신규 클라이언트 연결 시 한 번만 전송.
+	History []ConnHistory `json:"history,omitempty"`
 }
 
 // RawEvent — Event 에 서비스 이름(resolver 결과)을 붙인 실시간 이벤트
@@ -71,6 +73,7 @@ type StatSnapshot struct {
 	DstService      string  `json:"dst_service"`
 	SrcType         string  `json:"src_type"`           // "internal" | "external"
 	DstType         string  `json:"dst_type"`           // "internal" | "external"
+	AvgUs           uint64  `json:"avg_us"`
 	P50Us           uint64  `json:"p50_us"`
 	P95Us           uint64  `json:"p95_us"`
 	P99Us           uint64  `json:"p99_us"`

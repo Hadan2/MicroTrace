@@ -65,6 +65,8 @@ func main() {
 		h.Broadcast(msg)
 	})
 
+	h.SetHistoryFn(proc.GetHistory)
+
 	// 이벤트 채널: agent.Reader → stats.Processor
 	// 버퍼 1024: agent가 burst로 이벤트를 뿜어도 processor가 따라잡을 시간을 줌
 	eventCh := make(chan model.Event, 1024)

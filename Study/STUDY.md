@@ -133,6 +133,21 @@ Study/
 - 내부 노드: 상단 원형 배치 / 외부 노드: 하단 가로 나열
 - 수정 파일: `collector/model/event.go`, `collector/stats/stats.go`, `frontend/src/types.ts`, `frontend/src/components/TopologyGraph.tsx`
 
+### ✅ [2026-04-23] AVG 지표 추가
+- `stats.go` `percentiles()` 반환값에 avg 추가 (링버퍼 합산 / count)
+- `model/event.go` `StatSnapshot`에 `AvgUs` 필드 추가
+- 프론트 `types.ts`, `useWebSocket.ts`, `LatencyChart.tsx`에 avg 반영
+- 그래프에 AVG 점선(회색)으로 표시 — 이상치에 취약한 특성을 P50과 구분하기 위해 점선 처리
+- 수정 파일: `collector/stats/stats.go`, `collector/model/event.go`, `frontend/src/types.ts`, `frontend/src/hooks/useWebSocket.ts`, `frontend/src/components/LatencyChart.tsx`
+
+### ✅ [2026-04-23] 히스토리 보관 — 새로고침 후 그래프 복원
+- collector `connStats`에 `history []model.HistoryPoint` 슬라이스 추가 (최대 3600개 = 1시간)
+- 1초 스냅샷마다 포인트 추가, 오래된 것부터 제거
+- `stats.Processor.GetHistory()` — 전체 히스토리 조회 함수
+- `hub.SetHistoryFn()` — 신규 클라이언트 연결 시 `"history"` 메시지로 한 번에 전송
+- 프론트: `"history"` 메시지 수신 시 history 상태 초기화 → 새로고침해도 그래프 유지
+- 수정 파일: `collector/model/event.go`, `collector/stats/stats.go`, `collector/hub/hub.go`, `collector/main.go`, `frontend/src/types.ts`, `frontend/src/hooks/useWebSocket.ts`
+
 ### ✅ [2026-04-23] 그래프 라이브러리 교체 — Recharts → Lightweight Charts
 - Recharts 한계: 실시간 데이터 유입 시 Brush 상태 리셋, 드래그 패닝 미지원
 - **TradingView Lightweight Charts v5** 로 교체 (Apache 2.0, 무료)
@@ -146,6 +161,23 @@ Study/
 - 오른쪽 끝 라벨 제거 (`lastValueVisible: false`) — 헤더 뱃지로 대체
 - 워터마크 CSS로 숨김 (Apache 2.0 라이선스상 의무 없음)
 - 수정 파일: `frontend/src/components/LatencyChart.tsx`
+
+### ✅ [2026-04-23] NetSim 프로토타입 — spike 주입 도구
+- 별도 프로젝트 `/home/seojinlee/projects/NetSim/` 으로 분리 (독립 배포)
+- UI는 MicroTrace 대시보드에 통합 예정 (NetSim은 REST API만 노출)
+- `POST /inject {"container": "...", "latency_ms": 200}` → tc netem으로 패킷 지연 주입
+- `POST /rollback {"container": "..."}` → tc 규칙 해제
+- 동작 원리: Docker API로 컨테이너 PID 조회 → nsenter로 Network Namespace 진입 → tc netem 적용
+- 실행: `sudo go run .` (nsenter + tc 모두 root 권한 필요)
+- 상세: `Study/network/tcp.md` → EWMA 잔재 섹션
+
+### 📝 [2026-04-23] srtt EWMA 한계 및 대응 방향 (미결)
+- MicroTrace는 커널 `srtt_us`(EWMA 평활화 값)를 읽어서 RTT를 측정
+- spike 1개가 들어와도 이후 수십 개 패킷에 EWMA 잔재가 남아 P99가 천천히 내려옴
+- 상세: `Study/network/tcp.md` → EWMA 잔재 섹션
+- **미결 선택지:**
+  - `mdev_us` 추가 — srtt + mdev 조합으로 spike 감지 정확도 향상 (구현 간단)
+  - kprobe로 raw RTT 직접 측정 — EWMA 완전 우회 (구현 복잡, Cilium/Pixie 방식)
 
 ---
 

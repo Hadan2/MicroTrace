@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { StatSnapshot, OutboundMsg } from '../types'
+import type { StatSnapshot, OutboundMsg, ConnHistory } from '../types'
 
 // key: "src→dst", value: 최신 StatSnapshot
 export type SnapshotMap = Record<string, StatSnapshot>
@@ -7,15 +7,16 @@ export type SnapshotMap = Record<string, StatSnapshot>
 // 시계열 히스토리 한 포인트
 export interface HistoryPoint {
   time: number   // Date.now()
+  avg: number
   p50: number
   p95: number
   p99: number
 }
 
-// key: "src→dst", value: 최근 60개 포인트 (1초 주기 → 60초)
+// key: "src→dst", value: 최근 3600개 포인트 (1초 주기 → 1시간)
 export type HistoryMap = Record<string, HistoryPoint[]>
 
-const MAX_HISTORY = 60
+const MAX_HISTORY = 3600
 
 export function useWebSocket(url: string) {
   const [snapshots, setSnapshots] = useState<SnapshotMap>({})
@@ -48,6 +49,7 @@ export function useWebSocket(url: string) {
             const existing = prev[key] ?? []
             const point: HistoryPoint = {
               time: Date.now(),
+              avg: snap.avg_us,
               p50: snap.p50_us,
               p95: snap.p95_us,
               p99: snap.p99_us,
@@ -55,6 +57,21 @@ export function useWebSocket(url: string) {
             const updated = [...existing, point].slice(-MAX_HISTORY)
             return { ...prev, [key]: updated }
           })
+        } else if (msg.msg_type === 'history' && msg.history) {
+          // 신규 연결 시 collector가 보내는 전체 히스토리로 초기화
+          const nextSnapshots: SnapshotMap = {}
+          const nextHistory: HistoryMap = {}
+          msg.history.forEach((conn: ConnHistory) => {
+            nextHistory[conn.key] = conn.points.map(p => ({
+              time: p.time,
+              avg: p.avg_us,
+              p50: p.p50_us,
+              p95: p.p95_us,
+              p99: p.p99_us,
+            }))
+          })
+          setSnapshots(prev => ({ ...nextSnapshots, ...prev }))
+          setHistory(nextHistory)
         } else if (msg.msg_type === 'remove' && msg.remove_key) {
           const key = msg.remove_key
           setSnapshots(prev => {

@@ -26,19 +26,30 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// HistoryFn — 신규 클라이언트에게 전달할 히스토리를 가져오는 함수 타입.
+// stats.Processor.GetHistory와 같은 시그니처.
+type HistoryFn func() []model.ConnHistory
+
 // Hub — WebSocket 클라이언트 연결 집합과 브로드캐스트 채널
 type Hub struct {
 	mu        sync.Mutex
 	clients   map[*websocket.Conn]bool
 	broadcast chan []byte // JSON 직렬화된 OutboundMsg
+	historyFn HistoryFn  // 신규 클라이언트용 히스토리 조회 함수
 }
 
 // New — Hub를 생성한다. main에서 한 번만 호출한다.
 func New() *Hub {
 	return &Hub{
 		clients:   make(map[*websocket.Conn]bool),
-		broadcast: make(chan []byte, 512), // 버퍼 512: 통계 burst 대응
+		broadcast: make(chan []byte, 512),
 	}
+}
+
+// SetHistoryFn — 히스토리 조회 함수를 등록한다.
+// stats.Processor 초기화 후 main에서 호출한다.
+func (h *Hub) SetHistoryFn(fn HistoryFn) {
+	h.historyFn = fn
 }
 
 // Run — broadcast 채널을 소비하며 모든 클라이언트에 전송하는 메인 루프.
@@ -92,6 +103,17 @@ func (h *Hub) ServeWs(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 
 	log.Printf("[hub] 클라이언트 연결: %s (현재 %d명)", r.RemoteAddr, count)
+
+	// 신규 클라이언트에게 히스토리 전송
+	if h.historyFn != nil {
+		history := h.historyFn()
+		if len(history) > 0 {
+			msg := model.OutboundMsg{MsgType: "history", History: history}
+			if data, err := json.Marshal(msg); err == nil {
+				conn.WriteMessage(websocket.TextMessage, data)
+			}
+		}
+	}
 
 	// ReadMessage 루프 — 클라이언트 연결 끊김 감지용 goroutine
 	// 브라우저 탭 닫힘 / 네트워크 끊김 → ReadMessage 에러 → unregister

@@ -39,6 +39,9 @@ const (
 
 	// ttlSweepInterval — TTL 만료 연결을 정리하는 주기
 	ttlSweepInterval = 10 * time.Second
+
+	// maxHistory — 연결별 시계열 히스토리 최대 보관 개수 (1초 주기 × 3600 = 1시간)
+	maxHistory = 3600
 )
 
 // ConnKey — 연결을 식별하는 키 (출발지 서비스 → 목적지 서비스)
@@ -71,6 +74,9 @@ type connStats struct {
 	lastSeen   time.Time // 마지막 이벤트 수신 시각 (TTL 계산용)
 	srcType    string    // "internal" | "external"
 	dstType    string    // "internal" | "external"
+
+	// history: 1초마다 스냅샷 포인트를 추가. 최대 maxHistory개 (오래된 것부터 제거)
+	history []model.HistoryPoint
 }
 
 // addRTT — 새 RTT를 링버퍼에 추가한다.
@@ -82,24 +88,25 @@ func (s *connStats) addRTT(us uint64) {
 	}
 }
 
-// percentiles — 현재 링버퍼에서 p50, p95, p99를 계산한다.
+// percentiles — 현재 링버퍼에서 avg, p50, p95, p99를 계산한다.
 //
 // 링버퍼를 복사 후 정렬한다. 원본을 정렬하면 순서가 깨진다.
 // 샘플이 없으면 모두 0을 반환한다.
-func (s *connStats) percentiles() (p50, p95, p99 uint64) {
+func (s *connStats) percentiles() (avg, p50, p95, p99 uint64) {
 	if s.count == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 
 	// 링버퍼에서 유효한 샘플만 복사
 	samples := make([]uint64, s.count)
+	var sum uint64
 	for i := 0; i < s.count; i++ {
-		// head는 "다음에 쓸 위치" = 가장 오래된 위치
-		// count < rttRingSize 이면 0번 인덱스부터 count-1까지가 유효
-		// count == rttRingSize 이면 head부터 순환하며 전부 유효
 		idx := (s.head - s.count + i + rttRingSize) % rttRingSize
 		samples[i] = s.ring[idx]
+		sum += s.ring[idx]
 	}
+
+	avg = sum / uint64(s.count)
 
 	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
 
@@ -120,7 +127,7 @@ func percentileIdx(n, p int) int {
 
 // isSpike — 최신 RTT가 p99 × spikeMultiplier를 초과하면 spike로 판단한다.
 func (s *connStats) isSpike(latestUs uint64) (bool, uint64) {
-	_, _, p99 := s.percentiles()
+	_, _, _, p99 := s.percentiles()
 	if p99 == 0 {
 		return false, 0
 	}
@@ -242,7 +249,7 @@ func (p *Processor) publishSnapshots() {
 	p.mu.Unlock()
 
 	for _, e := range entries {
-		p50, p95, p99 := e.cs.percentiles()
+		avg, p50, p95, p99 := e.cs.percentiles()
 
 		// 가장 최근 RTT로 spike 판단
 		var latestUs uint64
@@ -257,6 +264,7 @@ func (p *Processor) publishSnapshots() {
 			DstService:       e.key.Dst,
 			SrcType:          e.cs.srcType,
 			DstType:          e.cs.dstType,
+			AvgUs:            avg,
 			P50Us:            p50,
 			P95Us:            p95,
 			P99Us:            p99,
@@ -265,6 +273,23 @@ func (p *Processor) publishSnapshots() {
 			IsSpike:          spike,
 			SpikeThresholdUs: threshold,
 		}
+
+		// 히스토리 포인트 추가 (collector 보관용)
+		p.mu.Lock()
+		if cs, ok := p.conns[e.key]; ok {
+			pt := model.HistoryPoint{
+				Time:  time.Now().UnixMilli(),
+				AvgUs: avg,
+				P50Us: p50,
+				P95Us: p95,
+				P99Us: p99,
+			}
+			cs.history = append(cs.history, pt)
+			if len(cs.history) > maxHistory {
+				cs.history = cs.history[len(cs.history)-maxHistory:]
+			}
+		}
+		p.mu.Unlock()
 
 		if spike {
 			log.Printf("[stats] SPIKE 감지: %s→%s latency=%dµs threshold=%dµs",
@@ -308,4 +333,25 @@ func (p *Processor) sweepExpired() {
 			RemoveKey: key.Src + "→" + key.Dst,
 		})
 	}
+}
+
+// GetHistory — 현재 추적 중인 모든 연결의 히스토리를 반환한다.
+// 신규 클라이언트 연결 시 호출해서 한 번에 전송한다.
+func (p *Processor) GetHistory() []model.ConnHistory {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	result := make([]model.ConnHistory, 0, len(p.conns))
+	for key, cs := range p.conns {
+		if len(cs.history) == 0 {
+			continue
+		}
+		points := make([]model.HistoryPoint, len(cs.history))
+		copy(points, cs.history)
+		result = append(result, model.ConnHistory{
+			Key:    key.Src + "→" + key.Dst,
+			Points: points,
+		})
+	}
+	return result
 }
