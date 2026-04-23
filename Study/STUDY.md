@@ -111,6 +111,42 @@ Study/
 - 트러블슈팅: `vite.config.ts`에 `host: true` 추가 → WSL2 외부 접근 가능
 - 상세: `Study/Errors/04.09_errors.md`
 
+### ✅ [2026-04-23] Snapshot TTL — 오래된 연결 자동 제거
+- `connStats`에 `lastSeen` 타임스탬프 추가, 이벤트마다 갱신
+- 10초마다 `sweepExpired()` 실행 → 30초 동안 이벤트 없는 연결 삭제
+- TTL 만료 시 `"remove"` 메시지를 프론트로 전송
+- 프론트: `"remove"` 수신 시 snapshots/history에서 해당 key 삭제 → 노드/엣지 자동 제거
+- 수정 파일: `collector/stats/stats.go`, `collector/model/event.go`, `frontend/src/hooks/useWebSocket.ts`
+
+### ✅ [2026-04-23] EnrichResolver — 외부 IP → 도메인명 변환
+- `resolver/enrich.go` 신규 추가
+- DockerResolver가 모르는 외부 IP → `net.LookupAddr()` rDNS 조회
+- `golang.org/x/net/publicsuffix`로 등록 도메인 파싱 (`lb-140-82-112-21.github.com` → `github.com`)
+- 결과 캐시로 반복 DNS 조회 없음
+- 같은 회사 여러 IP → 같은 노드로 자동 통합
+- 수정 파일: `collector/resolver/enrich.go` (신규), `collector/main.go`
+
+### ✅ [2026-04-23] 내부/외부 노드 구분
+- `StatSnapshot`에 `src_type`, `dst_type` 필드 추가 (`"internal"` | `"external"`)
+- DockerResolver 결과가 원본 IP와 같으면 external, 다르면 internal로 판단
+- 토폴로지: 내부 노드(실선), 외부 노드(점선 + 흐린 색)로 시각적 구분
+- 내부 노드: 상단 원형 배치 / 외부 노드: 하단 가로 나열
+- 수정 파일: `collector/model/event.go`, `collector/stats/stats.go`, `frontend/src/types.ts`, `frontend/src/components/TopologyGraph.tsx`
+
+### ✅ [2026-04-23] 그래프 라이브러리 교체 — Recharts → Lightweight Charts
+- Recharts 한계: 실시간 데이터 유입 시 Brush 상태 리셋, 드래그 패닝 미지원
+- **TradingView Lightweight Charts v5** 로 교체 (Apache 2.0, 무료)
+- 드래그 패닝 / 휠 줌 기본 내장
+- **Live/Pause 모드** 구현
+  - 기본: LIVE 표시와 함께 그래프가 우방향으로 실시간 흐름
+  - 사용자가 드래그 시작하는 순간 자동으로 Pause 모드 전환
+  - "▶ Live 복귀" 버튼 클릭 시 최신 데이터로 즉시 이동
+- y축 단위 포맷터 (`412µs`, `1.1ms`)
+- 시간 포맷 로컬 시간 기준 (`04/23 02:16:20`)
+- 오른쪽 끝 라벨 제거 (`lastValueVisible: false`) — 헤더 뱃지로 대체
+- 워터마크 CSS로 숨김 (Apache 2.0 라이선스상 의무 없음)
+- 수정 파일: `frontend/src/components/LatencyChart.tsx`
+
 ---
 
 ## Phase 3 - 동적 kprobe 활성화 🔲 미착수

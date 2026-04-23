@@ -1,6 +1,11 @@
 @import "tailwindcss";
 @import "@xyflow/react/dist/style.css";
 
+/* Lightweight Charts 워터마크 제거 */
+.tv-lightweight-charts a {
+  display: none !important;
+}
+
 /* ReactFlow Controls 라이트 테마 */
 .react-flow__controls {
   background: #ffffff;

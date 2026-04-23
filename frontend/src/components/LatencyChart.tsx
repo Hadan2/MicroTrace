@@ -1,13 +1,5 @@
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  ReferenceLine,
-} from 'recharts'
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { createChart, LineSeries, type IChartApi, type ISeriesApi, type LineData, type UTCTimestamp, ColorType } from 'lightweight-charts'
 import type { HistoryPoint } from '../hooks/useWebSocket'
 import type { StatSnapshot } from '../types'
 
@@ -19,16 +11,143 @@ interface Props {
 
 function formatUs(us: number): string {
   if (us >= 1000) return `${(us / 1000).toFixed(1)}ms`
-  return `${us}µs`
-}
-
-function formatTime(ts: number): string {
-  const d = new Date(ts)
-  return `${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`
+  return `${Math.round(us)}µs`
 }
 
 export default function LatencyChart({ historyKey, history, snap }: Props) {
-  if (!historyKey || history.length === 0) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const chartRef     = useRef<IChartApi | null>(null)
+  const p50Ref       = useRef<ISeriesApi<'Line'> | null>(null)
+  const p95Ref       = useRef<ISeriesApi<'Line'> | null>(null)
+  const p99Ref       = useRef<ISeriesApi<'Line'> | null>(null)
+  const isLiveRef    = useRef(true)
+  const [isLive, setIsLive]     = useState(true)
+
+  const goLive = useCallback(() => {
+    isLiveRef.current = true
+    setIsLive(true)
+    // 최신 데이터로 스크롤
+    chartRef.current?.timeScale().scrollToRealTime()
+  }, [])
+
+  // 차트 생성 — historyKey 바뀔 때만
+  useEffect(() => {
+    if (!containerRef.current || !historyKey) return
+
+    chartRef.current?.remove()
+    chartRef.current = null
+    isLiveRef.current = true
+    setIsLive(true)
+
+    const chart = createChart(containerRef.current, {
+      width:  containerRef.current.clientWidth,
+      height: containerRef.current.clientHeight,
+      layout: {
+        background: { type: ColorType.Solid, color: '#ffffff' },
+        textColor: '#94a3b8',
+        fontSize: 11,
+      },
+      grid: {
+        vertLines: { color: '#f1f5f9' },
+        horzLines: { color: '#f1f5f9' },
+      },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: true,
+        borderColor: '#e2e8f0',
+        fixLeftEdge: false,
+        fixRightEdge: false,
+      },
+      rightPriceScale: {
+        borderColor: '#e2e8f0',
+      },
+      localization: {
+        priceFormatter: (v: number) => formatUs(v),
+        timeFormatter: (ts: number) => {
+          const d = new Date(ts * 1000)
+          const month = (d.getMonth() + 1).toString().padStart(2, '0')
+          const day   = d.getDate().toString().padStart(2, '0')
+          const hh    = d.getHours().toString().padStart(2, '0')
+          const mm    = d.getMinutes().toString().padStart(2, '0')
+          const ss    = d.getSeconds().toString().padStart(2, '0')
+          return `${month}/${day} ${hh}:${mm}:${ss}`
+        },
+      },
+      crosshair: {
+        mode: 1,
+      },
+      handleScale: true,
+      handleScroll: true,
+      watermark: { visible: false },
+    })
+
+    // 사용자가 스크롤/줌하면 Live 모드 해제
+    chart.timeScale().subscribeVisibleTimeRangeChange(() => {
+      if (isLiveRef.current) {
+        // scrollToRealTime 호출로 인한 이벤트는 무시
+        return
+      }
+    })
+
+    chart.subscribeClick(() => {
+      // 클릭은 무시
+    })
+
+    // 드래그 시작 감지 — Live 해제
+    containerRef.current.addEventListener('mousedown', () => {
+      if (isLiveRef.current) {
+        isLiveRef.current = false
+        setIsLive(false)
+      }
+    })
+
+    const seriesOpts = { lineWidth: 2, lastValueVisible: false, priceLineVisible: false }
+    p50Ref.current = chart.addSeries(LineSeries, { ...seriesOpts, color: '#22c55e', title: 'P50' })
+    p95Ref.current = chart.addSeries(LineSeries, { ...seriesOpts, color: '#eab308', title: 'P95' })
+    p99Ref.current = chart.addSeries(LineSeries, { ...seriesOpts, color: '#f97316', title: 'P99' })
+
+    chartRef.current = chart
+
+    // 리사이즈
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current && chartRef.current) {
+        chartRef.current.applyOptions({
+          width:  containerRef.current.clientWidth,
+          height: containerRef.current.clientHeight,
+        })
+      }
+    })
+    ro.observe(containerRef.current)
+
+    return () => {
+      ro.disconnect()
+      chart.remove()
+      chartRef.current = null
+    }
+  }, [historyKey])
+
+  // 데이터 업데이트 — history 바뀔 때마다
+  useEffect(() => {
+    if (!chartRef.current || !p50Ref.current || !p95Ref.current || !p99Ref.current) return
+    if (history.length === 0) return
+
+    const toLineData = (vals: number[]): LineData[] =>
+      history.map((h, i) => ({
+        time: Math.floor(h.time / 1000) as UTCTimestamp,
+        value: vals[i],
+      }))
+
+    p50Ref.current.setData(toLineData(history.map(h => h.p50)))
+    p95Ref.current.setData(toLineData(history.map(h => h.p95)))
+    p99Ref.current.setData(toLineData(history.map(h => h.p99)))
+
+    // Live 모드면 항상 최신으로 스크롤
+    if (isLiveRef.current) {
+      chartRef.current.timeScale().scrollToRealTime()
+    }
+  }, [history])
+
+  if (!historyKey) {
     return (
       <div className="h-full flex items-center justify-center text-slate-400 text-sm">
         토폴로지에서 엣지를 클릭하면 그래프가 표시됩니다
@@ -36,10 +155,8 @@ export default function LatencyChart({ historyKey, history, snap }: Props) {
     )
   }
 
-  const spikeThreshold = snap?.spike_threshold_us
-
   return (
-    <div className="h-full flex flex-col px-5 py-4 gap-3">
+    <div className="h-full flex flex-col px-5 py-3 gap-2">
       {/* 헤더 */}
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
@@ -48,6 +165,19 @@ export default function LatencyChart({ historyKey, history, snap }: Props) {
             <span className="text-xs bg-red-50 border border-red-300 text-red-600 px-2 py-0.5 rounded-full">
               ⚠ SPIKE
             </span>
+          )}
+          {isLive ? (
+            <span className="flex items-center gap-1 text-xs text-green-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block" />
+              LIVE
+            </span>
+          ) : (
+            <button
+              onClick={goLive}
+              className="text-xs bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-600 px-2 py-0.5 rounded-full"
+            >
+              ▶ Live 복귀
+            </button>
           )}
         </div>
         {/* 현재값 뱃지 */}
@@ -67,48 +197,8 @@ export default function LatencyChart({ historyKey, history, snap }: Props) {
         </div>
       </div>
 
-      {/* 그래프 */}
-      <div className="flex-1 min-h-0">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={history} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-            <XAxis
-              dataKey="time"
-              tickFormatter={formatTime}
-              tick={{ fill: '#94a3b8', fontSize: 11 }}
-              axisLine={{ stroke: '#e2e8f0' }}
-              tickLine={false}
-              minTickGap={40}
-            />
-            <YAxis
-              tickFormatter={formatUs}
-              tick={{ fill: '#94a3b8', fontSize: 11 }}
-              axisLine={false}
-              tickLine={false}
-              width={52}
-            />
-            <Tooltip
-              contentStyle={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: 6, boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}
-              labelStyle={{ color: '#64748b', fontSize: 11 }}
-              labelFormatter={(v) => formatTime(v as number)}
-              formatter={(value: number) => [formatUs(value), '']}
-            />
-            <Legend
-              wrapperStyle={{ fontSize: 11, color: '#94a3b8' }}
-            />
-            {spikeThreshold && (
-              <ReferenceLine
-                y={spikeThreshold}
-                stroke="#ef4444"
-                strokeDasharray="4 3"
-                label={{ value: 'spike', fill: '#ef4444', fontSize: 10, position: 'insideTopRight' }}
-              />
-            )}
-            <Line type="monotone" dataKey="p50" name="P50" stroke="#22c55e" dot={false} strokeWidth={1.5} />
-            <Line type="monotone" dataKey="p95" name="P95" stroke="#eab308" dot={false} strokeWidth={1.5} />
-            <Line type="monotone" dataKey="p99" name="P99" stroke="#f97316" dot={false} strokeWidth={2} />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
+      {/* 차트 영역 */}
+      <div ref={containerRef} className="flex-1 min-h-0 w-full" />
     </div>
   )
 }
