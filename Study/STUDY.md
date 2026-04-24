@@ -176,11 +176,69 @@ Study/
 - spike 1개가 들어와도 이후 수십 개 패킷에 EWMA 잔재가 남아 P99가 천천히 내려옴
 - 상세: `Study/network/tcp.md` → EWMA 잔재 섹션
 - **결론: sock_ops + Go mdev 계산이 현실적 선택**
-  - Datadog NPM, Cilium Hubble 등 상용 툴 모두 EWMA srtt 사용 (raw RTT 아님)
+  - Datadog Cloud Network Monitoring은 TCP Latency를 smoothed RTT, TCP Jitter를 smoothed RTT variance로 설명
+  - Cilium/Hubble은 service map, flow, drop, tcp flags, HTTP metrics 중심이며 per-flow SRTT가 메인 지표는 아님
   - kprobe raw RTT(`tcp_ack_update_rtt`)는 static 함수라 커널 버전마다 시그니처 다름 → 이식성 낮음
-  - "Cilium/Pixie 방식이 raw RTT" 는 잘못된 정보: Cilium은 sock_ops + srtt_us, Pixie는 syscall 레벨 앱 레이어 타이밍
+  - "상용/오픈소스 네트워크 툴이 모두 raw RTT를 직접 보여준다" 는 가정은 부정확
   - Go에서 mdev 공식 직접 계산 (`mdev = mdev×0.75 + |rtt-srtt|×0.25`) → 커널 버전 의존성 없음
   - raw RTT는 Phase 3 검토 대상으로 남겨두되 우선순위 낮음
+
+### ✅ [2026-04-24] Go collector에서 flow-level mdev 계산 구현
+- 기존 eBPF `jitter_us` 근사값 대신 Go collector에서 flow별 mdev를 직접 계산하도록 변경
+- `ConnKey`는 서비스 간 집계/토폴로지용으로 유지하고, 별도 `FlowKey`를 추가해 개별 TCP 흐름 상태를 추적
+  - `ConnKey{Src, Dst}`: 서비스 간 edge 집계, P50/P95/P99, 히스토리, TTL 제거용
+  - `FlowKey{SockID, SAddr, DAddr, DPort}`: 개별 소켓의 `srtt_us`, `mdev_us` 계산용
+- mdev 계산 공식:
+  - 첫 RTT 샘플: `srtt = rtt`, `mdev = 0`
+  - 이후 샘플: `err = abs(rtt - srtt)`
+  - `mdev = (3*mdev + err) / 4`
+  - `srtt = (7*srtt + rtt) / 8`
+- `jitter_us` JSON 필드는 유지하되 의미를 "최신 flow-level mdev"로 변경
+- 초기에는 `jitterRing` 평균을 화면에 표시했으나, 안정 구간의 0 근처 샘플이 섞여 spike 반응이 희석되는 문제 확인
+- 수정 후 `StatSnapshot.JitterUs`는 평균이 아니라 최신 mdev 값을 내보냄
+- 수정 파일:
+  - `collector/stats/stats.go`
+  - `collector/model/event.go`
+
+### ✅ [2026-04-24] Latest SRTT 지표 추가 및 차트 정리
+- 현재 `latency_us`는 실제로 `skops->srtt_us >> 3` 값임을 확인
+  - 즉 기존 P50/P95/P99/AVG는 raw RTT가 아니라 SRTT 기반 집계
+- `StatSnapshot`과 `HistoryPoint`에 `latest_srtt_us` 추가
+- React 차트에 `SRTT` 선을 추가해 최신 smoothed RTT를 직접 표시
+- 실험 결과:
+  - `SRTT`는 NetSim latency 주입/해제에 가장 직관적으로 반응
+  - `P95/P99`는 tail latency 흔적을 보여주지만, 링버퍼에 남은 과거 spike 때문에 해제 후에도 천천히 내려감
+  - `Jitter(mdev)`는 RTT 변동성/불안정성을 보여주는 보조 지표로 적합
+- 차트 정책 정리:
+  - 메인 판단 지표: `SRTT`
+  - 변동성 보조 지표: `Jitter(mdev)`
+  - tail latency 참고 지표: `P95/P99`
+  - `AVG`는 이상치에 끌리므로 보조/비교용
+- 기존 `P50 ± jitter` 밴드는 해석이 모호하고 눈에 잘 띄지 않아 제거
+- 현재 차트 라인:
+  - `SRTT`
+  - `AVG`
+  - `P50`
+  - `P95`
+  - `P99`
+  - `Jitter`
+- 수정 파일:
+  - `collector/model/event.go`
+  - `collector/stats/stats.go`
+  - `frontend/src/types.ts`
+  - `frontend/src/hooks/useWebSocket.ts`
+  - `frontend/src/components/LatencyChart.tsx`
+
+### 📝 [2026-04-24] 지표 해석 기준 정리
+- `SRTT`: 현재 연결의 TCP latency 수준. 사용자가 기대하는 "spike 주입 시 상승, 해제 시 하락"에 가장 가까운 메인 지표
+- `P50`: 최근 구간의 일반적인 SRTT 수준
+- `P95/P99`: 최근 구간의 tail latency 흔적. 장애가 있었는지 확인하는 데 유용하지만 현재 상태 복귀 판단에는 부적합
+- `Jitter(mdev)`: SRTT가 안정적인지 흔들리는지 판단하는 변동성 지표
+- `Spike`: 최신 SRTT가 안정 baseline 대비 비정상적으로 튄 순간을 표시하는 이벤트성 신호
+- 제품 방향:
+  - MicroTrace 메인 그래프는 `SRTT + Jitter` 중심으로 단순화
+  - `P50/P95/P99/AVG`는 상세 분석 또는 보조 배지로 낮추는 방향 검토
+  - raw RTT 수집은 커널 버전 의존성이 있어 Phase 3 연구 과제로 유지
 
 ---
 
