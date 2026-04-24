@@ -5,6 +5,7 @@ export interface StatSnapshot {
   dst_service: string
   src_type: 'internal' | 'external'
   dst_type: 'internal' | 'external'
+  latest_srtt_us: number
   avg_us: number
   p50_us: number
   p95_us: number
@@ -18,6 +19,7 @@ export interface StatSnapshot {
 
 export interface HistoryPoint {
   time: number
+  latest_srtt_us: number
   avg_us: number
   p50_us: number
   p95_us: number

@@ -7,6 +7,7 @@ export type SnapshotMap = Record<string, StatSnapshot>
 // 시계열 히스토리 한 포인트
 export interface HistoryPoint {
   time: number   // Date.now()
+  latest_srtt_us: number
   avg_us: number
   p50_us: number
   p95_us: number
@@ -50,6 +51,7 @@ export function useWebSocket(url: string) {
             const existing = prev[key] ?? []
             const point: HistoryPoint = {
               time: Date.now(),
+              latest_srtt_us: snap.latest_srtt_us,
               avg_us: snap.avg_us,
               p50_us: snap.p50_us,
               p95_us: snap.p95_us,
@@ -66,6 +68,7 @@ export function useWebSocket(url: string) {
           msg.history.forEach((conn: ConnHistory) => {
             nextHistory[conn.key] = conn.points.map(p => ({
               time: p.time,
+              latest_srtt_us: p.latest_srtt_us,
               avg_us: p.avg_us,
               p50_us: p.p50_us,
               p95_us: p.p95_us,

@@ -54,6 +54,20 @@ type ConnKey struct {
 	Dst string
 }
 
+// FlowKey — 개별 TCP 흐름(소켓)을 식별하는 내부 키
+//
+// ConnKey가 "서비스 간 연결" 집계용이라면, FlowKey는 "EWMA/mdev 계산용"이다.
+// mdev는 소켓별 상태를 가져야 하므로 서비스 단위로 섞으면 안 된다.
+//
+// PID 필드는 sock_ops 제약으로 실제 pid가 아니라 local_port 값이다.
+// 여기에 출발지/목적지 IP와 포트를 함께 묶어 흐름을 구분한다.
+type FlowKey struct {
+	SockID uint32
+	SAddr  string
+	DAddr  string
+	DPort  uint16
+}
+
 // nodeType — resolver 결과가 원본 IP와 같으면 외부, 다르면 내부 컨테이너
 func nodeType(ip, resolved string) string {
 	if ip == resolved {
@@ -62,13 +76,25 @@ func nodeType(ip, resolved string) string {
 	return "internal"
 }
 
+// flowState — 개별 흐름의 srtt/mdev 상태
+//
+// 커널 srtt_us 대신 Go에서 직접 EWMA를 계산한다.
+// 첫 RTT 샘플에서는 srtt=rtt, mdev=0 으로 초기화하고
+// 두 번째 샘플부터 RFC 스타일 공식에 따라 갱신한다.
+type flowState struct {
+	srttUs      uint64
+	mdevUs      uint64
+	lastSeen    time.Time
+	initialized bool
+}
+
 // connStats — 연결 하나의 RTT 링버퍼와 집계 상태
 type connStats struct {
 	// 링버퍼: 최근 rttRingSize 개의 RTT(마이크로초)를 원형으로 덮어쓴다.
 	// 배열 크기가 고정이라 힙 할당이 없고, 오래된 데이터가 자동으로 사라진다.
 	ring  [rttRingSize]uint64
-	head  int  // 다음에 쓸 인덱스
-	count int  // 현재 저장된 샘플 수 (최대 rttRingSize)
+	head  int // 다음에 쓸 인덱스
+	count int // 현재 저장된 샘플 수 (최대 rttRingSize)
 
 	// jitter 링버퍼: mdev_us 값을 RTT와 동일한 방식으로 보관
 	jitterRing  [rttRingSize]uint64
@@ -107,17 +133,13 @@ func (s *connStats) addJitter(us uint64) {
 	}
 }
 
-// avgJitter — 링버퍼에 보관된 jitter 값의 평균을 반환한다.
-func (s *connStats) avgJitter() uint64 {
+// latestJitter — 가장 최근에 계산된 flow-level mdev 값을 반환한다.
+func (s *connStats) latestJitter() uint64 {
 	if s.jitterCount == 0 {
 		return 0
 	}
-	var sum uint64
-	for i := 0; i < s.jitterCount; i++ {
-		idx := (s.jitterHead - s.jitterCount + i + rttRingSize) % rttRingSize
-		sum += s.jitterRing[idx]
-	}
-	return sum / uint64(s.jitterCount)
+	idx := (s.jitterHead - 1 + rttRingSize) % rttRingSize
+	return s.jitterRing[idx]
 }
 
 // updateStableP99 — 네트워크가 안정적일 때만 stableP99를 갱신한다.
@@ -208,6 +230,7 @@ type Processor struct {
 
 	mu    sync.Mutex
 	conns map[ConnKey]*connStats
+	flows map[FlowKey]*flowState
 }
 
 // New — Processor를 생성한다.
@@ -219,6 +242,7 @@ func New(r resolver.ServiceResolver, fn BroadcastFn) *Processor {
 		resolver:  r,
 		broadcast: fn,
 		conns:     make(map[ConnKey]*connStats),
+		flows:     make(map[FlowKey]*flowState),
 	}
 }
 
@@ -258,34 +282,42 @@ func (p *Processor) Run(eventCh <-chan model.Event) {
 // 2. RawEvent를 즉시 브로드캐스트 (실시간 이벤트 로그용)
 // 3. RTT/retransmit 이벤트면 링버퍼에 추가
 func (p *Processor) handleEvent(e model.Event) {
+	now := time.Now()
 	dstService := p.resolver.Resolve(e.DAddr)
 	srcService := p.resolver.Resolve(e.SAddr)
 
 	// 실시간 이벤트를 즉시 클라이언트로 전달
 	raw := model.RawEvent{
-		Type:       e.Type,
-		SrcService: srcService,
-		DstService: dstService,
-		DPort:      e.DPort,
-		LatencyUs:  e.LatencyUs,
-		TimestampNs: time.Now().UnixNano(),
+		Type:        e.Type,
+		SrcService:  srcService,
+		DstService:  dstService,
+		DPort:       e.DPort,
+		LatencyUs:   e.LatencyUs,
+		TimestampNs: now.UnixNano(),
 	}
 	p.broadcast(model.OutboundMsg{MsgType: "event", Event: &raw})
 
 	// 링버퍼 업데이트
-	key := ConnKey{Src: srcService, Dst: dstService}
+	connKey := ConnKey{Src: srcService, Dst: dstService}
 	p.mu.Lock()
-	cs := p.getOrCreate(key)
+	cs := p.getOrCreateConn(connKey)
 
 	cs.srcType = nodeType(e.SAddr, srcService)
 	cs.dstType = nodeType(e.DAddr, dstService)
-	cs.lastSeen = time.Now()
+	cs.lastSeen = now
 	switch e.Type {
 	case "connect", "rtt":
 		if e.LatencyUs > 0 {
+			flowKey := FlowKey{
+				SockID: e.PID,
+				SAddr:  e.SAddr,
+				DAddr:  e.DAddr,
+				DPort:  e.DPort,
+			}
+			jitterUs := p.updateFlowMdev(flowKey, e.LatencyUs, now)
 			cs.addRTT(e.LatencyUs)
-			cs.addJitter(e.JitterUs)
-			cs.updateStableP99(e.JitterUs)
+			cs.addJitter(jitterUs)
+			cs.updateStableP99(jitterUs)
 		}
 	case "retransmit":
 		cs.retransmit++
@@ -309,7 +341,7 @@ func (p *Processor) publishSnapshots() {
 
 	for _, e := range entries {
 		avg, p50, p95, p99 := e.cs.percentiles()
-		jitter := e.cs.avgJitter()
+		jitter := e.cs.latestJitter()
 
 		// 가장 최근 RTT로 spike 판단
 		var latestUs uint64
@@ -324,6 +356,7 @@ func (p *Processor) publishSnapshots() {
 			DstService:       e.key.Dst,
 			SrcType:          e.cs.srcType,
 			DstType:          e.cs.dstType,
+			LatestSRTTUs:     latestUs,
 			AvgUs:            avg,
 			P50Us:            p50,
 			P95Us:            p95,
@@ -339,12 +372,13 @@ func (p *Processor) publishSnapshots() {
 		p.mu.Lock()
 		if cs, ok := p.conns[e.key]; ok {
 			pt := model.HistoryPoint{
-				Time:     time.Now().UnixMilli(),
-				AvgUs:    avg,
-				P50Us:    p50,
-				P95Us:    p95,
-				P99Us:    p99,
-				JitterUs: jitter,
+				Time:         time.Now().UnixMilli(),
+				LatestSRTTUs: latestUs,
+				AvgUs:        avg,
+				P50Us:        p50,
+				P95Us:        p95,
+				P99Us:        p99,
+				JitterUs:     jitter,
 			}
 			cs.history = append(cs.history, pt)
 			if len(cs.history) > maxHistory {
@@ -362,9 +396,45 @@ func (p *Processor) publishSnapshots() {
 	}
 }
 
-// getOrCreate — ConnKey에 해당하는 connStats를 가져오거나 새로 만든다.
+// updateFlowMdev — 개별 흐름의 srtt/mdev를 갱신하고 최신 mdev를 반환한다.
+//
+// 1차 구현 공식:
+//
+//	err  = abs(rtt - srtt)
+//	mdev = mdev*0.75 + err*0.25
+//	srtt = srtt*0.875 + rtt*0.125
+//
+// 정수 연산으로 처리하기 위해 다음과 같이 계산한다.
+//
+//	mdev = (3*mdev + err) / 4
+//	srtt = (7*srtt + rtt) / 8
+func (p *Processor) updateFlowMdev(key FlowKey, rttUs uint64, now time.Time) uint64 {
+	fs := p.getOrCreateFlow(key, now)
+	fs.lastSeen = now
+
+	if !fs.initialized {
+		fs.srttUs = rttUs
+		fs.mdevUs = 0
+		fs.initialized = true
+		return 0
+	}
+
+	errUs := absDiff(rttUs, fs.srttUs)
+	fs.mdevUs = (3*fs.mdevUs + errUs) / 4
+	fs.srttUs = (7*fs.srttUs + rttUs) / 8
+	return fs.mdevUs
+}
+
+func absDiff(a, b uint64) uint64 {
+	if a > b {
+		return a - b
+	}
+	return b - a
+}
+
+// getOrCreateConn — ConnKey에 해당하는 connStats를 가져오거나 새로 만든다.
 // 호출 전 p.mu를 잡고 있어야 한다.
-func (p *Processor) getOrCreate(key ConnKey) *connStats {
+func (p *Processor) getOrCreateConn(key ConnKey) *connStats {
 	if cs, ok := p.conns[key]; ok {
 		return cs
 	}
@@ -372,6 +442,17 @@ func (p *Processor) getOrCreate(key ConnKey) *connStats {
 	p.conns[key] = cs
 	log.Printf("[stats] 새 연결 추적 시작: %s → %s", key.Src, key.Dst)
 	return cs
+}
+
+// getOrCreateFlow — FlowKey에 해당하는 flowState를 가져오거나 새로 만든다.
+// 호출 전 p.mu를 잡고 있어야 한다.
+func (p *Processor) getOrCreateFlow(key FlowKey, now time.Time) *flowState {
+	if fs, ok := p.flows[key]; ok {
+		return fs
+	}
+	fs := &flowState{lastSeen: now}
+	p.flows[key] = fs
+	return fs
 }
 
 // sweepExpired — lastSeen이 connTTL을 초과한 연결을 삭제하고
@@ -384,6 +465,11 @@ func (p *Processor) sweepExpired() {
 		if now.Sub(cs.lastSeen) > connTTL {
 			expired = append(expired, key)
 			delete(p.conns, key)
+		}
+	}
+	for key, fs := range p.flows {
+		if now.Sub(fs.lastSeen) > connTTL {
+			delete(p.flows, key)
 		}
 	}
 	p.mu.Unlock()

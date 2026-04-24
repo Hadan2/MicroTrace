@@ -14,24 +14,25 @@ package model
 // Phase 2에서 필드가 추가되면 여기와 tcp_trace_common.h 두 곳만 수정한다.
 // ─────────────────────────────────────────────
 type Event struct {
-	Type      string `json:"type"`        // "connect" | "rtt" | "retransmit"
-	PID       uint32 `json:"pid"`         // sock_ops 제한으로 local_port 대체 사용
-	Comm      string `json:"comm"`        // 프로세스 이름 (sock_ops에선 항상 빈 문자열)
-	SAddr     string `json:"saddr"`       // 출발지 IPv4 문자열 — 이 소켓이 속한 컨테이너 IP
-	DAddr     string `json:"daddr"`       // 목적지 IPv4 문자열 (예: "172.17.0.3")
-	DPort     uint16 `json:"dport"`       // 목적지 포트
-	LatencyUs uint64 `json:"latency_us"`  // RTT (마이크로초). retransmit 이벤트에서는 0
-	JitterUs  uint64 `json:"jitter_us"`   // RTT 변동폭 (mdev_us >> 3). retransmit에서는 0
+	Type      string `json:"type"`       // "connect" | "rtt" | "retransmit"
+	PID       uint32 `json:"pid"`        // sock_ops 제한으로 local_port 대체 사용
+	Comm      string `json:"comm"`       // 프로세스 이름 (sock_ops에선 항상 빈 문자열)
+	SAddr     string `json:"saddr"`      // 출발지 IPv4 문자열 — 이 소켓이 속한 컨테이너 IP
+	DAddr     string `json:"daddr"`      // 목적지 IPv4 문자열 (예: "172.17.0.3")
+	DPort     uint16 `json:"dport"`      // 목적지 포트
+	LatencyUs uint64 `json:"latency_us"` // RTT (마이크로초). retransmit 이벤트에서는 0
+	JitterUs  uint64 `json:"jitter_us"`  // RTT 변동폭 (mdev_us >> 3). retransmit에서는 0
 }
 
 // HistoryPoint — 1초 단위 시계열 포인트 (collector가 보관, 신규 클라이언트에게 전송)
 type HistoryPoint struct {
-	Time     int64  `json:"time"`      // Unix millisecond
-	AvgUs    uint64 `json:"avg_us"`
-	P50Us    uint64 `json:"p50_us"`
-	P95Us    uint64 `json:"p95_us"`
-	P99Us    uint64 `json:"p99_us"`
-	JitterUs uint64 `json:"jitter_us"` // 해당 구간 평균 jitter (mdev 평균)
+	Time         int64  `json:"time"` // Unix millisecond
+	LatestSRTTUs uint64 `json:"latest_srtt_us"`
+	AvgUs        uint64 `json:"avg_us"`
+	P50Us        uint64 `json:"p50_us"`
+	P95Us        uint64 `json:"p95_us"`
+	P99Us        uint64 `json:"p99_us"`
+	JitterUs     uint64 `json:"jitter_us"` // 최신 flow-level mdev 값
 }
 
 // ConnHistory — 연결 하나의 전체 히스토리 (신규 클라이언트 전송용)
@@ -49,7 +50,7 @@ type ConnHistory struct {
 type OutboundMsg struct {
 	MsgType string `json:"msg_type"` // "event" | "stats" | "remove" | "history"
 
-	Event     *RawEvent    `json:"event,omitempty"`
+	Event     *RawEvent     `json:"event,omitempty"`
 	Stats     *StatSnapshot `json:"stats,omitempty"`
 	RemoveKey string        `json:"remove_key,omitempty"`
 
@@ -59,9 +60,9 @@ type OutboundMsg struct {
 
 // RawEvent — Event 에 서비스 이름(resolver 결과)을 붙인 실시간 이벤트
 type RawEvent struct {
-	Type        string `json:"type"`         // "connect" | "rtt" | "retransmit"
-	SrcService  string `json:"src_service"`  // resolver가 채운 출발지 서비스 이름
-	DstService  string `json:"dst_service"`  // resolver가 채운 목적지 서비스 이름
+	Type        string `json:"type"`        // "connect" | "rtt" | "retransmit"
+	SrcService  string `json:"src_service"` // resolver가 채운 출발지 서비스 이름
+	DstService  string `json:"dst_service"` // resolver가 채운 목적지 서비스 이름
 	DPort       uint16 `json:"dport"`
 	LatencyUs   uint64 `json:"latency_us"`
 	TimestampNs int64  `json:"timestamp_ns"` // collector 수신 시각 (Unix nanosecond)
@@ -73,15 +74,16 @@ type RawEvent struct {
 type StatSnapshot struct {
 	SrcService       string `json:"src_service"`
 	DstService       string `json:"dst_service"`
-	SrcType          string `json:"src_type"`            // "internal" | "external"
-	DstType          string `json:"dst_type"`            // "internal" | "external"
+	SrcType          string `json:"src_type"` // "internal" | "external"
+	DstType          string `json:"dst_type"` // "internal" | "external"
+	LatestSRTTUs     uint64 `json:"latest_srtt_us"`
 	AvgUs            uint64 `json:"avg_us"`
 	P50Us            uint64 `json:"p50_us"`
 	P95Us            uint64 `json:"p95_us"`
 	P99Us            uint64 `json:"p99_us"`
-	JitterUs         uint64 `json:"jitter_us"`           // 최근 구간 평균 jitter (mdev 평균)
+	JitterUs         uint64 `json:"jitter_us"` // 최신 flow-level mdev 값
 	RetransmitCount  uint32 `json:"retransmit_count"`
-	SampleCount      int    `json:"sample_count"`        // 이번 1초 구간 RTT 샘플 수
-	IsSpike          bool   `json:"is_spike"`            // stableP99 기반 spike 여부
-	SpikeThresholdUs uint64 `json:"spike_threshold_us"`  // 현재 임계값 (stableP99 × 3)
+	SampleCount      int    `json:"sample_count"`       // 이번 1초 구간 RTT 샘플 수
+	IsSpike          bool   `json:"is_spike"`           // stableP99 기반 spike 여부
+	SpikeThresholdUs uint64 `json:"spike_threshold_us"` // 현재 임계값 (stableP99 × 3)
 }
