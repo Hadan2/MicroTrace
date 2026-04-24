@@ -7,10 +7,11 @@ export type SnapshotMap = Record<string, StatSnapshot>
 // 시계열 히스토리 한 포인트
 export interface HistoryPoint {
   time: number   // Date.now()
-  avg: number
-  p50: number
-  p95: number
-  p99: number
+  avg_us: number
+  p50_us: number
+  p95_us: number
+  p99_us: number
+  jitter_us: number
 }
 
 // key: "src→dst", value: 최근 3600개 포인트 (1초 주기 → 1시간)
@@ -49,10 +50,11 @@ export function useWebSocket(url: string) {
             const existing = prev[key] ?? []
             const point: HistoryPoint = {
               time: Date.now(),
-              avg: snap.avg_us,
-              p50: snap.p50_us,
-              p95: snap.p95_us,
-              p99: snap.p99_us,
+              avg_us: snap.avg_us,
+              p50_us: snap.p50_us,
+              p95_us: snap.p95_us,
+              p99_us: snap.p99_us,
+              jitter_us: snap.jitter_us,
             }
             const updated = [...existing, point].slice(-MAX_HISTORY)
             return { ...prev, [key]: updated }
@@ -64,10 +66,11 @@ export function useWebSocket(url: string) {
           msg.history.forEach((conn: ConnHistory) => {
             nextHistory[conn.key] = conn.points.map(p => ({
               time: p.time,
-              avg: p.avg_us,
-              p50: p.p50_us,
-              p95: p.p95_us,
-              p99: p.p99_us,
+              avg_us: p.avg_us,
+              p50_us: p.p50_us,
+              p95_us: p.p95_us,
+              p99_us: p.p99_us,
+              jitter_us: p.jitter_us,
             }))
           })
           setSnapshots(prev => ({ ...nextSnapshots, ...prev }))

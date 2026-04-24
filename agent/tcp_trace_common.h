@@ -37,7 +37,8 @@
 //   합계: 40바이트, 컴파일러 자동 패딩 없음
 // ─────────────────────────────────────────────
 struct event {
-    __u64 latency_us;   // RTT (마이크로초). CONNECT 이벤트에서만 유효
+    __u64 latency_us;   // RTT (마이크로초). CONNECT/RTT 이벤트에서 유효
+    __u64 jitter_us;    // RTT 변동폭 (mdev_us >> 3). 불안정할수록 높음
     __u32 pid;          // 프로세스 ID (실제로는 local_port)
     __u32 saddr;        // 출발지 IPv4 주소 (big-endian) — 이 소켓이 속한 컨테이너 IP
     __u32 daddr;        // 목적지 IPv4 주소 (big-endian)

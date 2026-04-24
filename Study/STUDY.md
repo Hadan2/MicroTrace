@@ -171,13 +171,16 @@ Study/
 - 실행: `sudo go run .` (nsenter + tc 모두 root 권한 필요)
 - 상세: `Study/network/tcp.md` → EWMA 잔재 섹션
 
-### 📝 [2026-04-23] srtt EWMA 한계 및 대응 방향 (미결)
+### 📝 [2026-04-23] srtt EWMA 한계 및 대응 방향
 - MicroTrace는 커널 `srtt_us`(EWMA 평활화 값)를 읽어서 RTT를 측정
 - spike 1개가 들어와도 이후 수십 개 패킷에 EWMA 잔재가 남아 P99가 천천히 내려옴
 - 상세: `Study/network/tcp.md` → EWMA 잔재 섹션
-- **미결 선택지:**
-  - `mdev_us` 추가 — srtt + mdev 조합으로 spike 감지 정확도 향상 (구현 간단)
-  - kprobe로 raw RTT 직접 측정 — EWMA 완전 우회 (구현 복잡, Cilium/Pixie 방식)
+- **결론: sock_ops + Go mdev 계산이 현실적 선택**
+  - Datadog NPM, Cilium Hubble 등 상용 툴 모두 EWMA srtt 사용 (raw RTT 아님)
+  - kprobe raw RTT(`tcp_ack_update_rtt`)는 static 함수라 커널 버전마다 시그니처 다름 → 이식성 낮음
+  - "Cilium/Pixie 방식이 raw RTT" 는 잘못된 정보: Cilium은 sock_ops + srtt_us, Pixie는 syscall 레벨 앱 레이어 타이밍
+  - Go에서 mdev 공식 직접 계산 (`mdev = mdev×0.75 + |rtt-srtt|×0.25`) → 커널 버전 의존성 없음
+  - raw RTT는 Phase 3 검토 대상으로 남겨두되 우선순위 낮음
 
 ---
 

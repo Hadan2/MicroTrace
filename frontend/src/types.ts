@@ -9,6 +9,7 @@ export interface StatSnapshot {
   p50_us: number
   p95_us: number
   p99_us: number
+  jitter_us: number
   retransmit_count: number
   sample_count: number
   is_spike: boolean
@@ -21,6 +22,7 @@ export interface HistoryPoint {
   p50_us: number
   p95_us: number
   p99_us: number
+  jitter_us: number
 }
 
 export interface ConnHistory {

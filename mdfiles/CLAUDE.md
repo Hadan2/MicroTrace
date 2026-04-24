@@ -81,3 +81,9 @@ MicroTrace는 MSA 환경에서 1ms 미만의 지연 시간(Latency Spike)과 TCP
 - **백엔드 실행:** `go run main.go`
 - **프론트엔드 개발 서버:** `npm run dev` (React Web, Vite 기반)
 
+## 기타 AI 가 명시해야 할 것
+- 사용자의 단어 구분 : 
+  토폴로지 - Web UI 에서 컨테이너들을 시각화한 것을 말함
+  그래프 - Web UI 에서 p99, p95 등 측정 지표를 선 그래프로 나타낸 것을 말함
+  둘이 헷갈리지 말 것
+

@@ -61,11 +61,11 @@ static void output_event(const struct event *e)
         printf("{\"type\":\"retransmit\",\"pid\":%u,\"comm\":\"%s\",\"saddr\":\"%s\",\"daddr\":\"%s\",\"dport\":%u}\n",
                e->pid, e->comm, saddr_str, daddr_str, e->dport);
     } else if (e->type == EVENT_TYPE_RTT) {
-        printf("{\"type\":\"rtt\",\"pid\":%u,\"comm\":\"%s\",\"saddr\":\"%s\",\"daddr\":\"%s\",\"dport\":%u,\"latency_us\":%llu}\n",
-               e->pid, e->comm, saddr_str, daddr_str, e->dport, e->latency_us);
+        printf("{\"type\":\"rtt\",\"pid\":%u,\"comm\":\"%s\",\"saddr\":\"%s\",\"daddr\":\"%s\",\"dport\":%u,\"latency_us\":%llu,\"jitter_us\":%llu}\n",
+               e->pid, e->comm, saddr_str, daddr_str, e->dport, e->latency_us, e->jitter_us);
     } else {
-        printf("{\"type\":\"connect\",\"pid\":%u,\"comm\":\"%s\",\"saddr\":\"%s\",\"daddr\":\"%s\",\"dport\":%u,\"latency_us\":%llu}\n",
-               e->pid, e->comm, saddr_str, daddr_str, e->dport, e->latency_us);
+        printf("{\"type\":\"connect\",\"pid\":%u,\"comm\":\"%s\",\"saddr\":\"%s\",\"daddr\":\"%s\",\"dport\":%u,\"latency_us\":%llu,\"jitter_us\":%llu}\n",
+               e->pid, e->comm, saddr_str, daddr_str, e->dport, e->latency_us, e->jitter_us);
     }
     // stdout 버퍼를 즉시 비움 - 이벤트가 Go collector에 실시간으로 전달되도록
     fflush(stdout);

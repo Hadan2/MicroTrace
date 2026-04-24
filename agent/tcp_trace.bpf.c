@@ -51,6 +51,17 @@ static __always_inline void fill_event(struct event *e, struct bpf_sock_ops *sko
     // >> 16 으로 포트를 하위 16비트로 내린 뒤, bpf_ntohs()로 바이트 오더 변환
     e->dport      = bpf_ntohs(skops->remote_port >> 16);
     e->latency_us = latency_us;
+    // jitter 근사: srtt_us(평활 평균) - rtt_min(최근 최솟값)
+    // mdev_us가 이 커널 버전의 bpf_sock_ops에 없어서 srtt - rtt_min으로 대체.
+    // "평균이 최솟값보다 얼마나 높은가"로 변동폭을 근사함.
+    // srtt_us는 ×8 고정소수점, rtt_min은 실제 마이크로초이므로 단위를 맞춰서 계산.
+    if (type != EVENT_TYPE_RETRANSMIT) {
+        __u64 srtt_real = skops->srtt_us >> 3;
+        __u64 rtt_min   = skops->rtt_min;
+        e->jitter_us = (srtt_real > rtt_min) ? (srtt_real - rtt_min) : 0;
+    } else {
+        e->jitter_us = 0;
+    }
     __builtin_memset(e->comm, 0, sizeof(e->comm)); // comm 접근 불가
 }
 

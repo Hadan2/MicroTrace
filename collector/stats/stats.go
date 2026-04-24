@@ -70,6 +70,16 @@ type connStats struct {
 	head  int  // 다음에 쓸 인덱스
 	count int  // 현재 저장된 샘플 수 (최대 rttRingSize)
 
+	// jitter 링버퍼: mdev_us 값을 RTT와 동일한 방식으로 보관
+	jitterRing  [rttRingSize]uint64
+	jitterHead  int
+	jitterCount int
+
+	// stableP99: mdev가 낮은 "안정 구간"에서만 업데이트하는 기준선.
+	// spike 발생 중에도 이 값은 바뀌지 않으므로 Shadowing Effect 방지.
+	// spike 판단 threshold = stableP99 × spikeMultiplier
+	stableP99 uint64
+
 	retransmit uint32    // 누적 재전송 횟수
 	lastSeen   time.Time // 마지막 이벤트 수신 시각 (TTL 계산용)
 	srcType    string    // "internal" | "external"
@@ -85,6 +95,45 @@ func (s *connStats) addRTT(us uint64) {
 	s.head = (s.head + 1) % rttRingSize
 	if s.count < rttRingSize {
 		s.count++
+	}
+}
+
+// addJitter — 새 jitter(mdev) 값을 링버퍼에 추가한다.
+func (s *connStats) addJitter(us uint64) {
+	s.jitterRing[s.jitterHead] = us
+	s.jitterHead = (s.jitterHead + 1) % rttRingSize
+	if s.jitterCount < rttRingSize {
+		s.jitterCount++
+	}
+}
+
+// avgJitter — 링버퍼에 보관된 jitter 값의 평균을 반환한다.
+func (s *connStats) avgJitter() uint64 {
+	if s.jitterCount == 0 {
+		return 0
+	}
+	var sum uint64
+	for i := 0; i < s.jitterCount; i++ {
+		idx := (s.jitterHead - s.jitterCount + i + rttRingSize) % rttRingSize
+		sum += s.jitterRing[idx]
+	}
+	return sum / uint64(s.jitterCount)
+}
+
+// updateStableP99 — 네트워크가 안정적일 때만 stableP99를 갱신한다.
+//
+// "안정적"의 기준: jitter < stableJitterThreshold (현재 P50의 50%)
+// spike 발생 중(jitter 높음)에는 stableP99가 바뀌지 않아 Shadowing Effect를 방지한다.
+// stableP99가 아직 0이면(초기 상태) 무조건 세팅한다.
+func (s *connStats) updateStableP99(jitterUs uint64) {
+	_, p50, _, p99 := s.percentiles()
+	if p99 == 0 {
+		return
+	}
+	// 안정 구간 판단: jitter가 P50의 절반 미만이면 안정적으로 본다
+	stableThreshold := p50 / 2
+	if s.stableP99 == 0 || jitterUs <= stableThreshold {
+		s.stableP99 = p99
 	}
 }
 
@@ -125,13 +174,21 @@ func percentileIdx(n, p int) int {
 	return idx
 }
 
-// isSpike — 최신 RTT가 p99 × spikeMultiplier를 초과하면 spike로 판단한다.
+// isSpike — 최신 RTT가 stableP99 × spikeMultiplier를 초과하면 spike로 판단한다.
+//
+// stableP99: 안정 구간에서만 갱신되는 기준선.
+// 큰 spike 직후에도 threshold가 치솟지 않으므로 Shadowing Effect가 없다.
+// stableP99가 아직 없으면 현재 p99로 대체한다.
 func (s *connStats) isSpike(latestUs uint64) (bool, uint64) {
-	_, _, _, p99 := s.percentiles()
-	if p99 == 0 {
+	baseline := s.stableP99
+	if baseline == 0 {
+		_, _, _, p99 := s.percentiles()
+		baseline = p99
+	}
+	if baseline == 0 {
 		return false, 0
 	}
-	threshold := p99 * spikeMultiplier
+	threshold := baseline * spikeMultiplier
 	return latestUs > threshold, threshold
 }
 
@@ -227,6 +284,8 @@ func (p *Processor) handleEvent(e model.Event) {
 	case "connect", "rtt":
 		if e.LatencyUs > 0 {
 			cs.addRTT(e.LatencyUs)
+			cs.addJitter(e.JitterUs)
+			cs.updateStableP99(e.JitterUs)
 		}
 	case "retransmit":
 		cs.retransmit++
@@ -250,6 +309,7 @@ func (p *Processor) publishSnapshots() {
 
 	for _, e := range entries {
 		avg, p50, p95, p99 := e.cs.percentiles()
+		jitter := e.cs.avgJitter()
 
 		// 가장 최근 RTT로 spike 판단
 		var latestUs uint64
@@ -268,6 +328,7 @@ func (p *Processor) publishSnapshots() {
 			P50Us:            p50,
 			P95Us:            p95,
 			P99Us:            p99,
+			JitterUs:         jitter,
 			RetransmitCount:  e.cs.retransmit,
 			SampleCount:      e.cs.count,
 			IsSpike:          spike,
@@ -278,11 +339,12 @@ func (p *Processor) publishSnapshots() {
 		p.mu.Lock()
 		if cs, ok := p.conns[e.key]; ok {
 			pt := model.HistoryPoint{
-				Time:  time.Now().UnixMilli(),
-				AvgUs: avg,
-				P50Us: p50,
-				P95Us: p95,
-				P99Us: p99,
+				Time:     time.Now().UnixMilli(),
+				AvgUs:    avg,
+				P50Us:    p50,
+				P95Us:    p95,
+				P99Us:    p99,
+				JitterUs: jitter,
 			}
 			cs.history = append(cs.history, pt)
 			if len(cs.history) > maxHistory {

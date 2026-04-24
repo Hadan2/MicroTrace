@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { createChart, LineSeries, type IChartApi, type ISeriesApi, type LineData, type UTCTimestamp, ColorType } from 'lightweight-charts'
+import { createChart, LineSeries, AreaSeries, type IChartApi, type ISeriesApi, type LineData, type AreaData, type UTCTimestamp, ColorType } from 'lightweight-charts'
 import type { HistoryPoint } from '../hooks/useWebSocket'
 import type { StatSnapshot } from '../types'
 
@@ -15,14 +15,16 @@ function formatUs(us: number): string {
 }
 
 export default function LatencyChart({ historyKey, history, snap }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const chartRef     = useRef<IChartApi | null>(null)
-  const avgRef       = useRef<ISeriesApi<'Line'> | null>(null)
-  const p50Ref       = useRef<ISeriesApi<'Line'> | null>(null)
-  const p95Ref       = useRef<ISeriesApi<'Line'> | null>(null)
-  const p99Ref       = useRef<ISeriesApi<'Line'> | null>(null)
-  const isLiveRef    = useRef(true)
-  const [isLive, setIsLive]     = useState(true)
+  const containerRef      = useRef<HTMLDivElement>(null)
+  const chartRef          = useRef<IChartApi | null>(null)
+  const avgRef            = useRef<ISeriesApi<'Line'> | null>(null)
+  const p50Ref            = useRef<ISeriesApi<'Line'> | null>(null)
+  const p95Ref            = useRef<ISeriesApi<'Line'> | null>(null)
+  const p99Ref            = useRef<ISeriesApi<'Line'> | null>(null)
+  const jitterUpperRef    = useRef<ISeriesApi<'Area'> | null>(null)
+  const jitterLowerRef    = useRef<ISeriesApi<'Area'> | null>(null)
+  const isLiveRef         = useRef(true)
+  const [isLive, setIsLive] = useState(true)
 
   const goLive = useCallback(() => {
     isLiveRef.current = true
@@ -102,6 +104,22 @@ export default function LatencyChart({ historyKey, history, snap }: Props) {
       }
     })
 
+    // jitter 밴드: P50 ± jitter 범위를 반투명 영역으로 표시
+    // lower를 먼저 추가해서 다른 라인들 뒤에 깔리도록 함
+    const bandOpts = { lastValueVisible: false, priceLineVisible: false, lineWidth: 0 as const, lineColor: 'transparent' }
+    jitterLowerRef.current = chart.addSeries(AreaSeries, {
+      ...bandOpts,
+      title: '',
+      topColor: 'rgba(99,102,241,0.12)',
+      bottomColor: 'rgba(99,102,241,0.0)',
+    })
+    jitterUpperRef.current = chart.addSeries(AreaSeries, {
+      ...bandOpts,
+      title: 'Jitter',
+      topColor: 'rgba(99,102,241,0.12)',
+      bottomColor: 'rgba(99,102,241,0.12)',
+    })
+
     const seriesOpts = { lineWidth: 2, lastValueVisible: false, priceLineVisible: false }
     avgRef.current = chart.addSeries(LineSeries, { ...seriesOpts, color: '#94a3b8', title: 'AVG', lineStyle: 1 })
     p50Ref.current = chart.addSeries(LineSeries, { ...seriesOpts, color: '#22c55e', title: 'P50' })
@@ -131,6 +149,7 @@ export default function LatencyChart({ historyKey, history, snap }: Props) {
   // 데이터 업데이트 — history 바뀔 때마다
   useEffect(() => {
     if (!chartRef.current || !avgRef.current || !p50Ref.current || !p95Ref.current || !p99Ref.current) return
+    if (!jitterUpperRef.current || !jitterLowerRef.current) return
     if (history.length === 0) return
 
     // Lightweight Charts는 time을 UTC로 해석하므로 로컬 offset을 더해서 보정
@@ -150,10 +169,19 @@ export default function LatencyChart({ historyKey, history, snap }: Props) {
         value: fn(h),
       }))
 
-    avgRef.current.setData(toLineData(h => h.avg))
-    p50Ref.current.setData(toLineData(h => h.p50))
-    p95Ref.current.setData(toLineData(h => h.p95))
-    p99Ref.current.setData(toLineData(h => h.p99))
+    // jitter 밴드: P50 ± jitter. 음수 방지를 위해 lower는 0 이상으로 클램프
+    const toAreaData = (fn: (h: HistoryPoint) => number): AreaData[] =>
+      sorted.map(([sec, h]) => ({
+        time: sec as UTCTimestamp,
+        value: fn(h),
+      }))
+
+    avgRef.current.setData(toLineData(h => h.avg_us))
+    p50Ref.current.setData(toLineData(h => h.p50_us))
+    p95Ref.current.setData(toLineData(h => h.p95_us))
+    p99Ref.current.setData(toLineData(h => h.p99_us))
+    jitterUpperRef.current.setData(toAreaData(h => h.p50_us + h.jitter_us))
+    jitterLowerRef.current.setData(toAreaData(h => Math.max(0, h.p50_us - h.jitter_us)))
 
     // Live 모드면 항상 최신으로 스크롤
     if (isLiveRef.current) {
@@ -201,6 +229,15 @@ export default function LatencyChart({ historyKey, history, snap }: Props) {
             { label: 'P50', value: snap?.p50_us, color: '#22c55e' },
             { label: 'P95', value: snap?.p95_us, color: '#eab308' },
             { label: 'P99', value: snap?.p99_us, color: snap?.is_spike ? '#ef4444' : '#f97316' },
+            {
+              label: 'Jitter',
+              value: snap?.jitter_us,
+              // 0~1ms: 회색(안정) / 1~5ms: 노랑(주의) / 5ms 이상: 빨강(불안정)
+              color: snap == null ? '#94a3b8'
+                : snap.jitter_us >= 5000 ? '#ef4444'
+                : snap.jitter_us >= 1000 ? '#eab308'
+                : '#94a3b8',
+            },
           ].map(({ label, value, color }) => (
             <div key={label} className="flex flex-col items-center">
               <span style={{ color }} className="font-bold text-base">
