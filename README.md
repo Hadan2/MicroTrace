@@ -41,10 +41,10 @@
 
 | 문서 | 내용 |
 |---|---|
-| [microtrace.md](./microtrace.md) | MicroTrace 상세 기획서 |
-| [netsim.md](./netsim.md) | NetSim Lab 상세 기획서 |
-| [integration.md](./integration.md) | 통합/독립 운영 시나리오 |
-| [interview-qa.md](./interview-qa.md) | 면접 대비 Q&A |
+| [microtrace.md](./mdfiles/microtrace.md) | MicroTrace 상세 기획서 |
+| [netsim.md](./mdfiles/netsim.md) | NetSim Lab 상세 기획서 |
+| [integration.md](./mdfiles/integration.md) | 통합/독립 운영 시나리오 |
+| [interview-qa.md](./mdfiles/interview-qa.md) | 면접 대비 Q&A |
 
 ---
 
