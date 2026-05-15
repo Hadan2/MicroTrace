@@ -1,89 +1,225 @@
-# MicroTrace 프로젝트 가이드 (CLAUDE.md)
+# MicroTrace 프로젝트 가이드
 
-## 👤 사용자 배경
+> AI가 이 프로젝트에서 작업할 때 따라야 할 모든 규칙이 여기에 있다.
+> 루트의 `AGENTS.md`는 이 파일(mdfiles/CLAUDE.md)의 심볼릭 링크다.
+> **두 파일을 따로 수정하지 말 것. 항상 이 파일만 수정한다.**
+
+---
+
+## 사용자 배경
+
 - Linux 처음 사용. 기본 명령어(ls, cd, mkdir 등)도 모를 수 있음
 - 명령어 실행 시 역할과 옵션 의미를 항상 함께 설명할 것
 - 처음 보는 개념은 비유나 그림(ASCII)으로 자세히 설명할 것. 한줄 요약 금지
 - 개념 설명 시 ① 이게 뭔지 ② 왜 필요한지 ③ 어떻게 동작하는지 순서로 설명
-- 한글로 설명할 것.
+- 한글로 설명할 것
 
-## 📖 Study 폴더 관리 규칙
-- 프로젝트 루트의 `Study/` 폴더 하위에 **카테고리 폴더**로 분류하여 관리
-- 새로운 개념이 등장할 때마다 해당 파일에 추가. 파일이 없으면 새로 생성
-- 폴더/파일 분류 기준:
-  - `Study/kernel/ebpf.md` ← eBPF 개념, kprobe, tracepoint, Map, Ring Buffer, Verifier, Skeleton, CO-RE, sock_ops
-  - `Study/kernel/c_language.md` ← C 언어 문법, 포인터, 구조체 등
-  - `Study/kernel/go.md` ← Go 언어 문법, goroutine, channel 등
-  - `Study/network/tcp.md` ← TCP 연결 흐름, RTT, 재전송, Keep-Alive 등
-  - `Study/network/microservices.md` ← MSA 개념
-  - `Study/network/Netsim.md` ← tc netem 패킷 지연/손실 주입
-  - `Study/infra/linux.md` ← Linux 명령어, 파일시스템, 권한 등
-  - `Study/infra/docker.md` ← Docker, 컨테이너 등
-  - `Study/project/flow.md` ← MicroTrace 전체 빌드/실행 흐름
-  - `Study/Errors/` ← 날짜별 트러블슈팅 (03.13_errors.md 형식)
-  - 새 주제 등장 시 적절한 폴더에 새 파일 생성
-- 설명은 비유/흐름도를 포함하여 자세하게 작성
+---
 
-## 🎯 프로젝트 개요
-MicroTrace는 MSA 환경에서 1ms 미만의 지연 시간(Latency Spike)과 TCP 재전송을 추적하는 eBPF 기반 실시간 네트워크 프로파일러입니다.
-개발 기획서는  **README.md , integration.md, microtrace.md, netsim.md ** 를 참고하세요.
+## 프로젝트 개요
 
-## 🛠 기술 스택
-- **커널/에이전트:** C, eBPF (libbpf / cilium/ebpf 사용)
-- **백엔드:** Go (Goroutines, gRPC/IPC 기반 스트리밍)
-- **프론트엔드:** React Web (TypeScript) — Wails 아님. 브라우저로 접속하는 웹 UI. 로컬/EC2/K8s 모든 환경에서 URL 하나로 공유 가능.
-- **환경:** Linux (Ubuntu 22.04+ / eBPF 활성화된 WSL2 커널)
+MicroTrace는 MSA 환경에서 latency spike의 원인을 자동으로 좁혀주는 eBPF 기반 실시간 진단 도구다.
+네트워크 지표(RTT, 재전송)와 서버 리소스 지표(CPU throttling, IO wait, memory pressure)를 같은 시간축에서 수집해서
+"네트워크 문제인가, 서버 리소스 문제인가"를 빠르게 판별하는 것이 핵심 목표다.
 
-## 📚 학습 및 문서화 
-- **개념 우선:** 새로운 기능 구현 전, 반드시 관련 개념을 먼저 설명할 것
-- **Study 폴더:** 상세 개념 설명은 `Study/` 하위 주제별 파일에 작성 (ebpf.md, tcp.md, linux.md, go.md 등)
-- **STUDY.md 역할 축소:** `mdfiles/STUDY.md`는 구현 진행 상황을 간략히 기록하는 용도로만 사용
-  - 구현한 내용 한줄 요약
-  - 관련 Study 파일 링크 (예: 자세한 내용은 `Study/ebpf.md` 참고)
-  - 트러블슈팅 메모
+기획 문서: `mdfiles/microtrace.md`, `mdfiles/integration.md`, `mdfiles/netsim.md`
 
-## 💻 코딩 스타일 및 규칙(핵심 지침)
-- **eBPF (C):** 리눅스 커널 코딩 스타일 준수. CO-RE(Compile Once – Run Everywhere) 방식 지향. eBPF 검증기(Verifier) 제약 조건을 고려한 메모리 안전성 확보.
-- **Backend (Go):** Idiomatic Go 스타일. 스트리밍 데이터 처리에 채널(Channel) 활용. 철저한 에러 처리.
-- **Frontend (TS/React):** 함수형 컴포넌트 사용. 고빈도 데이터 처리를 위한 성능 최적화(Canvas 등).
-- **철저한 모듈화 (구체 규칙):**
-  - **인터페이스로 변경 경계를 격리한다.**
-    단계별로 교체가 예정된 구현체는 반드시 인터페이스 뒤에 숨긴다.
-    예: `ServiceResolver` 인터페이스 → `DockerResolver` (1단계) / `StaticResolver` (2단계) / `K8sResolver` (3단계).
-    호출 측(stats, hub)은 인터페이스만 보고, 구현체가 무엇인지 몰라야 한다.
-  - **패키지는 역할 단위로 나눈다. 파일 단위가 아니다.**
-    `agent/` (subprocess 실행·읽기), `hub/` (WebSocket 관리), `stats/` (집계·spike 감지), `resolver/` (IP→이름), `model/` (공유 타입) 으로 분리.
-    기능이 추가될 때 기존 패키지 내부를 수정하지, 다른 패키지가 서로 침범하지 않는다.
-  - **공유 타입은 model/ 한 곳에만 정의한다.**
-    `Event`, `StatSnapshot`, WebSocket 메시지 구조체 등을 여러 패키지가 각자 정의하지 않는다.
-    구조체 필드가 바뀌면 `model/event.go` 한 파일만 수정하면 전파된다.
-  - **통신 방식(transport)을 비즈니스 로직과 분리한다.**
-    stats 집계 로직은 "어떻게 데이터가 오는지" 몰라야 한다. agent/reader가 파이프든 gRPC든 상관없이 `chan model.Event` 하나만 넘긴다.
-    나중에 gRPC로 바꿔도 stats, hub 코드는 건드리지 않아도 된다.
-  - **새 단계 추가 시 기존 코드를 고치지 않고 구현체를 추가하는 방향으로 설계한다.**
-    새 환경(EC2, k8s) 지원은 새 파일(resolver 구현체, reader 구현체)을 추가하는 것으로 끝나야 한다.
+---
 
-## 🗺 단계별 변경 파일 지도
+## 기술 스택
 
-단계가 올라갈 때 **어느 파일만 건드리면 되는지** 미리 정리해둔다.
-나머지 파일(stats, hub, model)은 어느 단계에서도 수정하지 않는다.
+| 계층 | 기술 |
+|---|---|
+| 커널 에이전트 | C, eBPF (libbpf, sock_ops), `agent/tcp_trace` |
+| 리소스 에이전트 | Go, cgroup v2, `resource_agent/` |
+| 백엔드 | Go (goroutine, channel, WebSocket), `collector/` |
+| 프론트엔드 | React Web (TypeScript, Vite), `frontend/` |
+| 환경 | Linux Ubuntu 22.04+ / eBPF 활성화된 WSL2 커널 |
+
+프론트엔드는 Wails(데스크톱 앱)가 아니라 브라우저 웹 UI다. EC2/K8s 환경에서 URL 하나로 팀원이 공유할 수 있어야 한다.
+
+---
+
+## 개발 실행 — `make dev`
+
+가장 자주 쓰는 명령어다. 테스트 컨테이너 + collector + React 개발 서버를 한 번에 올린다.
+
+```bash
+make dev
+```
+
+### make dev 내부 실행 순서 (`scripts/dev.sh`)
+
+```
+1. 사전 검사
+   - docker, go, npm, docker compose 설치 여부 확인
+   - WSL2 IP 주소 감지 (hostname -I)
+   - collector는 eBPF attach에 root 권한 필요 → sudo -v 로 미리 인증
+
+2. resource_agent 빌드
+   - cd resource_agent && go build -o resource_agent .
+   - 빌드 실패해도 경고만 내고 계속 진행 (자원 수집 없이도 latency 추적 가능)
+   - SKIP_RESOURCE=1 환경변수로 건너뛸 수 있음
+
+3. collector 시작 (백그라운드)
+   - cd collector && sudo -n -E go run .
+   - eBPF sock_ops 프로그램을 루트 cgroup에 attach
+   - Docker API로 컨테이너 IP → 이름 매핑 캐시 초기화
+   - resource_agent를 subprocess로 실행
+   - :9090 에서 WebSocket 서버 대기
+
+4. 2초 대기
+   - eBPF attach가 완료된 후 testenv가 연결을 맺어야 sock_ops가 해당 소켓을 추적할 수 있음
+   - 순서가 뒤집히면 기존 Keep-Alive 연결은 추적 불가
+
+5. testenv 시작 (백그라운드)
+   - docker compose -f testenv/docker-compose.yml up --build
+   - service_a, service_b 컨테이너 실행
+   - service_a가 service_b로 주기적으로 HTTP 요청 전송
+
+6. 3초 대기
+   - Docker Compose가 컨테이너를 올리고 트래픽이 흐를 시간
+
+7. frontend 시작 (백그라운드)
+   - cd frontend && npm run dev -- --host 0.0.0.0 --port 5173
+   - VITE_MOCK=1 이면 VITE_MOCK=true 환경변수를 함께 설정 (mock 데이터 모드)
+
+8. 종료 (Ctrl+C)
+   - 모든 백그라운드 프로세스 kill
+   - KEEP_CONTAINERS=1 이 아니면 docker compose down 실행
+```
+
+### 환경변수
+
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| `KEEP_CONTAINERS` | `0` | `1`로 설정하면 종료 시 컨테이너를 내리지 않음 |
+| `SKIP_COLLECTOR` | `0` | `1`로 설정하면 collector를 시작하지 않음 |
+| `SKIP_RESOURCE` | `0` | `1`로 설정하면 resource_agent 빌드를 건너뜀 |
+| `VITE_MOCK` | `0` | `1`로 설정하면 프론트엔드가 mock 데이터를 사용 |
+| `COLLECTOR_BOOT_DELAY` | `2` | collector 기동 후 testenv 시작까지 대기 시간(초) |
+| `DEV_BOOT_DELAY` | `3` | testenv 기동 후 frontend 시작까지 대기 시간(초) |
+
+접속 주소:
+
+| 대상 | 주소 |
+|---|---|
+| React 대시보드 | `http://localhost:5173` |
+| Collector WebSocket | `ws://localhost:9090/ws` |
+| Collector 테스트 페이지 | `http://localhost:9090` |
+
+---
+
+## 코딩 규칙
+
+### Go (collector, resource_agent)
+
+- Idiomatic Go. 채널로 데이터 흐름 표현. 철저한 에러 처리.
+- **인터페이스로 변경 경계를 격리한다.**
+  교체가 예정된 구현체는 인터페이스 뒤에 숨긴다.
+  예: `ServiceResolver` → `DockerResolver` / `StaticResolver` / `K8sResolver`
+  예: `EventProvider` → `SubprocessProvider` (현재) / gRPC 구현체 (EC2 단계)
+  호출 측(stats, hub)은 인터페이스만 보고, 구현체가 무엇인지 몰라야 한다.
+- **패키지는 역할 단위로 나눈다.**
+  `agent/` (tcp_trace subprocess), `resource/` (resource_agent subprocess),
+  `hub/` (WebSocket), `stats/` (집계·spike), `resolver/` (IP→이름), `model/` (공유 타입)
+- **공유 타입은 `model/event.go` 한 곳에만 정의한다.**
+  필드 하나 추가할 때 이 파일 하나만 수정하면 전 패키지에 전파된다.
+- **통신 방식을 비즈니스 로직과 분리한다.**
+  stats는 데이터가 파이프로 오는지 gRPC로 오는지 모른다. `chan model.Event` 하나만 받는다.
+  gRPC로 전환해도 stats, hub는 건드리지 않는다.
+
+### eBPF (C)
+
+- 리눅스 커널 코딩 스타일. CO-RE(Compile Once – Run Everywhere) 방식.
+- eBPF Verifier 제약: 무한루프 금지, 메모리 범위 체크 필수.
+
+### Frontend (TypeScript/React)
+
+- 함수형 컴포넌트. 고빈도 데이터는 Canvas 직접 렌더링(devicePixelRatio 적용).
+- WebSocket 메시지 타입: `stats` / `event` / `resource` / `remove` / `history`
+
+---
+
+## 단계별 변경 파일 지도
+
+새 환경을 지원할 때 어느 파일만 건드리면 되는지 미리 정리해 둔다.
 
 | 변경 시점 | 건드리는 파일 | 건드리지 않는 파일 |
 |---|---|---|
-| **2단계: gRPC 전환** (EC2 멀티호스트) | `agent/reader.go` 만 교체 | stats, hub, model, resolver 전부 무관 |
-| **2단계: EC2 IP 매핑** | `resolver/` 에 `StaticResolver` 이미 구현됨. `main.go` 에서 선택만 변경 | stats, hub 무관 |
-| **3단계: k8s 지원** | `resolver/k8s_resolver.go` 파일 추가. `main.go` 에서 선택만 변경 | stats, hub 무관 |
-| **spike 임계값 조정** | `stats/stats.go` 의 `spikeMultiplier` 상수만 변경 | 나머지 전부 무관 |
-| **이벤트 필드 추가** (jitter, cwnd 등) | `model/event.go` + `agent/tcp_trace_common.h` 두 곳만 | 나머지는 새 필드를 그냥 통과시킴 |
+| gRPC 전환 (EC2 멀티호스트) | `agent/reader.go` 교체 | stats, hub, model, resolver |
+| EC2 IP 매핑 | `main.go`에서 `StaticResolver` 선택 | stats, hub |
+| k8s 지원 | `resolver/k8s_resolver.go` 추가, `main.go` 선택 변경 | stats, hub |
+| spike 임계값 조정 | `stats/stats.go`의 `spikeMultiplier` 상수 | 나머지 전부 |
+| 이벤트 필드 추가 | `model/event.go` + `agent/tcp_trace_common.h` | 나머지는 통과 |
 
-## 📋 주요 명령어
-- **에이전트 빌드:** `make build-ebpf`
-- **백엔드 실행:** `go run main.go`
-- **프론트엔드 개발 서버:** `npm run dev` (React Web, Vite 기반)
+---
 
-## 기타 AI 가 명시해야 할 것
-- 사용자의 단어 구분 : 
-  토폴로지 - Web UI 에서 컨테이너들을 시각화한 것을 말함
-  그래프 - Web UI 에서 p99, p95 등 측정 지표를 선 그래프로 나타낸 것을 말함
-  둘이 헷갈리지 말 것
+## 문서 구조
 
+| 파일 | 역할 |
+|---|---|
+| `mdfiles/CLAUDE.md` (이 파일) | AI 작업 가이드 원본. `AGENTS.md`는 이 파일의 심볼릭 링크 |
+| `mdfiles/todo.md` | 다음 작업 기록 |
+| `mdfiles/microtrace.md` | 전체 기획서 |
+| `Study/STUDY.md` | 구현 진행 기록 (요약) |
+| `Study/project/flow.md` | 빌드/실행/데이터 흐름 상세 |
+
+---
+
+## Git 관리 규칙
+
+**전략: GitHub Flow + Issue 기반 + Conventional Commits**
+
+### 작업 시작 전
+
+1. GitHub Issue를 생성한다 (작업 범위, 목적 명시)
+2. Issue 번호를 확인한다 (예: #12)
+3. 브랜치를 생성한다: `feat/#12-cause-kind` / `fix/#15-rtt-bug` / `docs/#20-flow-md`
+
+```bash
+git checkout -b feat/#12-cause-kind
+```
+
+### 작업 완료 후
+
+1. AI가 변경 내용을 분석해서 커밋 메시지를 제안한다.
+2. 커밋 메시지 형식: `<type>: <한글 요약> (closes #번호)`
+   - type: `feat` / `fix` / `refactor` / `docs` / `chore`
+   - 예: `feat: spike 원인 자동 판별 구현 (closes #12)`
+3. 사용자에게 커밋 여부를 묻는다. 동의하면 실행한다.
+4. main에 merge한다 (솔로이므로 PR 없이 직접 merge 가능).
+5. `closes #번호` 덕분에 GitHub Issue가 자동으로 닫힌다.
+
+### 규칙
+
+- **절대로 사용자 확인 없이 커밋하지 않는다.**
+- **이슈 없이 작업을 시작하지 않는다.**  새 작업이면 먼저 이슈 생성을 제안한다.
+- 사용자가 메시지 수정을 요청하면 수정 후 재확인한다.
+
+---
+
+## 용어 구분 (헷갈리지 말 것)
+
+| 용어 | 의미 |
+|---|---|
+| **토폴로지** | Web UI에서 컨테이너들을 노드·엣지로 시각화한 화면 |
+| **그래프** | Web UI에서 p99, p95 등 지표를 시간 축으로 나타낸 선 그래프 |
+
+---
+
+## Study 폴더 관리 규칙
+
+새로운 개념이 등장할 때마다 아래 파일에 추가한다.
+
+| 파일 | 다루는 내용 |
+|---|---|
+| `Study/kernel/ebpf.md` | eBPF, kprobe, tracepoint, Ring Buffer, Verifier, CO-RE, sock_ops |
+| `Study/kernel/c_language.md` | C 언어 문법, 포인터, 구조체 |
+| `Study/kernel/go.md` | Go 문법, goroutine, channel, sync |
+| `Study/network/tcp.md` | TCP 흐름, RTT, 재전송, Keep-Alive, EWMA |
+| `Study/network/websocket.md` | WebSocket 프로토콜, Hub 패턴 |
+| `Study/infra/linux.md` | Linux 명령어, cgroup v2, /proc |
+| `Study/infra/docker.md` | Docker, 컨테이너, Docker API |
+| `Study/project/flow.md` | MicroTrace 전체 빌드/실행/데이터 흐름 |
+| `Study/Errors/` | 날짜별 트러블슈팅 (03.13_errors.md 형식) |

@@ -44,6 +44,7 @@
 | [microtrace.md](./mdfiles/microtrace.md) | MicroTrace 상세 기획서 |
 | [netsim.md](./mdfiles/netsim.md) | NetSim Lab 상세 기획서 |
 | [integration.md](./mdfiles/integration.md) | 통합/독립 운영 시나리오 |
+| [todo.md](./mdfiles/todo.md) | 다음 작업 및 완료 이력 |
 | [interview-qa.md](./mdfiles/interview-qa.md) | 면접 대비 Q&A |
 
 ---
@@ -56,6 +57,36 @@
 | 백엔드 | Go (Goroutine, Channel, WebSocket) | Go (Docker API, REST API) |
 | 프론트엔드 | React Web (TypeScript) | Web UI (React) |
 | 인프라 | Docker, cgroup v2 | Docker API, Network Namespace |
+
+---
+
+## 개발용 원클릭 실행
+
+디버깅할 때 필요한 테스트 컨테이너, collector, React 개발 서버를 한 번에 실행합니다.
+
+```bash
+make dev
+```
+
+실행 후 접속:
+
+| 대상 | 주소 |
+|---|---|
+| React 대시보드 | `http://localhost:5173` 또는 런처가 출력한 WSL IP 주소 |
+| Collector 테스트 페이지 | `http://localhost:9090` 또는 런처가 출력한 WSL IP 주소 |
+| WebSocket | 프론트가 접속한 host 기준으로 자동 연결 |
+
+종료는 실행 중인 터미널에서 `Ctrl+C`를 누르면 됩니다. 기본적으로 테스트 컨테이너도 함께 정리됩니다. 컨테이너를 유지하고 싶으면 아래처럼 실행합니다.
+
+```bash
+KEEP_CONTAINERS=1 make dev
+```
+
+테스트 컨테이너만 수동으로 정리하려면:
+
+```bash
+make dev-down
+```
 
 ---
 
@@ -90,7 +121,7 @@
 | Phase | 내용 |
 |---|---|
 | Phase 1 | collector에 Docker API 연동 → IP를 컨테이너 이름으로 매핑 → 서비스 간 latency 시각화 기반 마련 |
-| Phase 2 | latency spike 감지 + CPU/IO 상관관계 수집 |
+| Phase 2 | latency spike 감지 + CPU/IO/Memory 리소스 수집 (고정 1초 주기, resource_agent 별도 바이너리) |
 | Phase 3 | React 토폴로지/상세 화면 → RTT, CPU, IO, 재전송을 함께 보여주는 drill-down UI |
 
 ### 환경별 지원 전략
