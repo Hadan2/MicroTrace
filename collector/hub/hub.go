@@ -30,10 +30,29 @@ var upgrader = websocket.Upgrader{
 // stats.Processor.GetHistory와 같은 시그니처.
 type HistoryFn func() []model.ConnHistory
 
+// client — 연결된 WebSocket 클라이언트 하나.
+//
+// Run()의 WriteMessage 실패 경로와 ReadMessage goroutine 종료 경로가
+// 동시에 conn.Close()를 호출할 수 있으므로 Once로 보호한다.
+type client struct {
+	conn *websocket.Conn
+	once sync.Once
+}
+
+func (c *client) close(h *Hub, addr string) {
+	c.once.Do(func() {
+		h.mu.Lock()
+		delete(h.clients, c.conn)
+		h.mu.Unlock()
+		c.conn.Close()
+		log.Printf("[hub] 클라이언트 해제: %s", addr)
+	})
+}
+
 // Hub — WebSocket 클라이언트 연결 집합과 브로드캐스트 채널
 type Hub struct {
 	mu        sync.Mutex
-	clients   map[*websocket.Conn]bool
+	clients   map[*websocket.Conn]*client
 	broadcast chan []byte // JSON 직렬화된 OutboundMsg
 	historyFn HistoryFn  // 신규 클라이언트용 히스토리 조회 함수
 }
@@ -41,7 +60,7 @@ type Hub struct {
 // New — Hub를 생성한다. main에서 한 번만 호출한다.
 func New() *Hub {
 	return &Hub{
-		clients:   make(map[*websocket.Conn]bool),
+		clients:   make(map[*websocket.Conn]*client),
 		broadcast: make(chan []byte, 512),
 	}
 }
@@ -59,15 +78,23 @@ func (h *Hub) SetHistoryFn(fn HistoryFn) {
 func (h *Hub) Run() {
 	for msg := range h.broadcast {
 		h.mu.Lock()
-		for conn := range h.clients {
-			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-				// 전송 실패 = 클라이언트 연결 끊김
+		var failed []*client
+		for _, c := range h.clients {
+			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				log.Printf("[hub] 클라이언트 전송 실패, 제거: %v", err)
-				conn.Close()
-				delete(h.clients, conn)
+				failed = append(failed, c)
 			}
 		}
+		for _, c := range failed {
+			delete(h.clients, c.conn)
+		}
 		h.mu.Unlock()
+
+		// conn.Close()는 블로킹될 수 있으므로 lock 밖에서 호출한다.
+		// Once 덕분에 ReadMessage goroutine과 충돌해도 한 번만 실행된다.
+		for _, c := range failed {
+			c.conn.Close()
+		}
 	}
 }
 
@@ -97,8 +124,10 @@ func (h *Hub) ServeWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	c := &client{conn: conn}
+
 	h.mu.Lock()
-	h.clients[conn] = true
+	h.clients[conn] = c
 	count := len(h.clients)
 	h.mu.Unlock()
 
@@ -118,14 +147,7 @@ func (h *Hub) ServeWs(w http.ResponseWriter, r *http.Request) {
 	// ReadMessage 루프 — 클라이언트 연결 끊김 감지용 goroutine
 	// 브라우저 탭 닫힘 / 네트워크 끊김 → ReadMessage 에러 → unregister
 	go func() {
-		defer func() {
-			h.mu.Lock()
-			delete(h.clients, conn)
-			h.mu.Unlock()
-			conn.Close()
-			log.Printf("[hub] 클라이언트 해제: %s", r.RemoteAddr)
-		}()
-
+		defer c.close(h, r.RemoteAddr)
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return

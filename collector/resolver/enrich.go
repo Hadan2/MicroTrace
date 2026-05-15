@@ -37,6 +37,11 @@ func NewEnrichResolver(docker *DockerResolver) *EnrichResolver {
 	}
 }
 
+// IsInternal — Docker 캐시 기준으로 판단한다. rDNS 변환 여부와 무관하다.
+func (r *EnrichResolver) IsInternal(ip string) bool {
+	return r.docker.IsInternal(ip)
+}
+
 // Resolve — IP를 사람이 읽을 수 있는 이름으로 변환한다.
 func (r *EnrichResolver) Resolve(ip string) string {
 	// 1. Docker 내부 컨테이너 IP인지 먼저 확인

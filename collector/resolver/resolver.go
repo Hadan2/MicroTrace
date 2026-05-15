@@ -36,6 +36,10 @@ type ServiceResolver interface {
 	// Resolve — IP를 서비스 이름으로 변환한다.
 	// 알 수 없는 IP면 IP 그대로 반환한다 (에러 반환 안 함 — 이벤트 처리를 막지 않기 위해).
 	Resolve(ip string) string
+
+	// IsInternal — IP가 내부 컨테이너(Docker 관리)인지 여부를 반환한다.
+	// rDNS로 이름이 바뀐 외부 IP를 internal로 오판하는 것을 방지한다.
+	IsInternal(ip string) bool
 }
 
 // ─────────────────────────────────────────────
@@ -89,6 +93,14 @@ func (r *DockerResolver) Resolve(ip string) string {
 		return name
 	}
 	return ip
+}
+
+// IsInternal — Docker 캐시에 있는 IP면 내부 컨테이너로 판단한다.
+func (r *DockerResolver) IsInternal(ip string) bool {
+	r.mu.RLock()
+	_, ok := r.cache[ip]
+	r.mu.RUnlock()
+	return ok
 }
 
 // refreshAll — 현재 실행 중인 모든 컨테이너의 IP를 캐시에 저장한다.
@@ -219,4 +231,10 @@ func (r *StaticResolver) Resolve(ip string) string {
 		return name
 	}
 	return ip
+}
+
+// IsInternal — 테이블에 명시된 IP만 내부로 판단한다.
+func (r *StaticResolver) IsInternal(ip string) bool {
+	_, ok := r.table[ip]
+	return ok
 }
