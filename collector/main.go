@@ -26,12 +26,14 @@ import (
 	"microtrace/collector/hub"
 	"microtrace/collector/model"
 	"microtrace/collector/resolver"
+	"microtrace/collector/resource"
 	"microtrace/collector/stats"
 )
 
 const (
-	agentBinary = "../agent/tcp_trace"
-	listenAddr  = ":9090"
+	agentBinary        = "../agent/tcp_trace"
+	resourceAgentBinary = "../resource_agent/resource_agent"
+	listenAddr         = ":9090"
 )
 
 func main() {
@@ -67,17 +69,23 @@ func main() {
 
 	h.SetHistoryFn(proc.GetHistory)
 
-	// 이벤트 채널: agent.Reader → stats.Processor
-	// 버퍼 1024: agent가 burst로 이벤트를 뿜어도 processor가 따라잡을 시간을 줌
-	eventCh := make(chan model.Event, 1024)
-	go proc.Run(eventCh)
-
 	// ── 5. Agent Reader 시작 ───────────────────────────────────────────
-	reader := agent.New(agentBinary)
-	if err := reader.Start(eventCh); err != nil {
+	var agentProvider agent.EventProvider = agent.NewSubprocessProvider(agentBinary)
+	eventCh, err := agentProvider.Start(ctx)
+	if err != nil {
 		log.Fatalf("[main] agent 시작 실패: %v", err)
 	}
-	defer reader.Stop()
+	go proc.Run(eventCh)
+
+	// ── 5b. Resource Agent 시작 ────────────────────────────────────────
+	// resource_agent 바이너리가 없으면 경고만 내고 계속 진행한다.
+	// 자원 수집 없이도 latency 추적은 정상 동작해야 한다.
+	var resProvider resource.ResourceProvider = resource.NewSubprocessProvider(resourceAgentBinary)
+	if resCh, resErr := resProvider.Start(ctx); resErr != nil {
+		log.Printf("[main] resource_agent 시작 실패 (자원 수집 비활성화): %v", resErr)
+	} else {
+		proc.ForwardResource(resCh)
+	}
 
 	// ── 6. HTTP 서버 ───────────────────────────────────────────────────
 	mux := http.NewServeMux()

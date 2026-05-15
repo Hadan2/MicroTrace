@@ -68,12 +68,13 @@ type FlowKey struct {
 	DPort  uint16
 }
 
-// nodeType — resolver 결과가 원본 IP와 같으면 외부, 다르면 내부 컨테이너
-func nodeType(ip, resolved string) string {
-	if ip == resolved {
-		return "external"
+// nodeType — resolver가 Docker 캐시에서 알고 있는 IP면 내부, 모르면 외부.
+// rDNS로 이름이 바뀐 외부 IP를 internal로 오판하는 것을 방지한다.
+func nodeType(ip string, r resolver.ServiceResolver) string {
+	if r.IsInternal(ip) {
+		return "internal"
 	}
-	return "internal"
+	return "external"
 }
 
 // flowState — 개별 흐름의 srtt/mdev 상태
@@ -302,8 +303,8 @@ func (p *Processor) handleEvent(e model.Event) {
 	p.mu.Lock()
 	cs := p.getOrCreateConn(connKey)
 
-	cs.srcType = nodeType(e.SAddr, srcService)
-	cs.dstType = nodeType(e.DAddr, dstService)
+	cs.srcType = nodeType(e.SAddr, p.resolver)
+	cs.dstType = nodeType(e.DAddr, p.resolver)
 	cs.lastSeen = now
 	switch e.Type {
 	case "connect", "rtt":
@@ -327,72 +328,71 @@ func (p *Processor) handleEvent(e model.Event) {
 
 // publishSnapshots — 모든 연결의 현재 통계를 StatSnapshot으로 만들어 브로드캐스트한다.
 func (p *Processor) publishSnapshots() {
+	now := time.Now()
+
+	// lock 한 번으로: 스냅샷 계산 + 히스토리 저장 + 발행 목록 수집을 함께 처리한다.
+	// 이전 구현은 unlock → 재lock 사이에 sweepExpired가 connStats를 삭제할 수 있었다.
 	p.mu.Lock()
-	// 스냅샷 생성 중 lock을 오래 잡지 않도록 먼저 복사
-	type entry struct {
-		key ConnKey
-		cs  connStats
+	type outEntry struct {
+		snap  model.StatSnapshot
+		spike bool
 	}
-	entries := make([]entry, 0, len(p.conns))
-	for k, cs := range p.conns {
-		entries = append(entries, entry{key: k, cs: *cs})
-	}
-	p.mu.Unlock()
+	out := make([]outEntry, 0, len(p.conns))
 
-	for _, e := range entries {
-		avg, p50, p95, p99 := e.cs.percentiles()
-		jitter := e.cs.latestJitter()
+	for key, cs := range p.conns {
+		avg, p50, p95, p99 := cs.percentiles()
+		jitter := cs.latestJitter()
 
-		// 가장 최근 RTT로 spike 판단
 		var latestUs uint64
-		if e.cs.count > 0 {
-			latestIdx := (e.cs.head - 1 + rttRingSize) % rttRingSize
-			latestUs = e.cs.ring[latestIdx]
+		if cs.count > 0 {
+			latestIdx := (cs.head - 1 + rttRingSize) % rttRingSize
+			latestUs = cs.ring[latestIdx]
 		}
-		spike, threshold := e.cs.isSpike(latestUs)
+		spike, threshold := cs.isSpike(latestUs)
 
 		snap := model.StatSnapshot{
-			SrcService:       e.key.Src,
-			DstService:       e.key.Dst,
-			SrcType:          e.cs.srcType,
-			DstType:          e.cs.dstType,
+			SrcService:       key.Src,
+			DstService:       key.Dst,
+			SrcType:          cs.srcType,
+			DstType:          cs.dstType,
 			LatestSRTTUs:     latestUs,
 			AvgUs:            avg,
 			P50Us:            p50,
 			P95Us:            p95,
 			P99Us:            p99,
 			JitterUs:         jitter,
-			RetransmitCount:  e.cs.retransmit,
-			SampleCount:      e.cs.count,
+			RetransmitCount:  cs.retransmit,
+			SampleCount:      cs.count,
 			IsSpike:          spike,
 			SpikeThresholdUs: threshold,
 		}
 
-		// 히스토리 포인트 추가 (collector 보관용)
-		p.mu.Lock()
-		if cs, ok := p.conns[e.key]; ok {
-			pt := model.HistoryPoint{
-				Time:         time.Now().UnixMilli(),
-				LatestSRTTUs: latestUs,
-				AvgUs:        avg,
-				P50Us:        p50,
-				P95Us:        p95,
-				P99Us:        p99,
-				JitterUs:     jitter,
-			}
-			cs.history = append(cs.history, pt)
-			if len(cs.history) > maxHistory {
-				cs.history = cs.history[len(cs.history)-maxHistory:]
-			}
+		// 히스토리 포인트 저장 — 같은 lock 안에서 처리
+		pt := model.HistoryPoint{
+			Time:         now.UnixMilli(),
+			LatestSRTTUs: latestUs,
+			AvgUs:        avg,
+			P50Us:        p50,
+			P95Us:        p95,
+			P99Us:        p99,
+			JitterUs:     jitter,
 		}
-		p.mu.Unlock()
+		cs.history = append(cs.history, pt)
+		if len(cs.history) > maxHistory {
+			cs.history = cs.history[len(cs.history)-maxHistory:]
+		}
 
-		if spike {
+		out = append(out, outEntry{snap: snap, spike: spike})
+	}
+	p.mu.Unlock()
+
+	// broadcast는 lock 밖에서 — hub 전송이 느려도 stats 처리를 막지 않는다.
+	for _, e := range out {
+		if e.spike {
 			log.Printf("[stats] SPIKE 감지: %s→%s latency=%dµs threshold=%dµs",
-				e.key.Src, e.key.Dst, latestUs, threshold)
+				e.snap.SrcService, e.snap.DstService, e.snap.LatestSRTTUs, e.snap.SpikeThresholdUs)
 		}
-
-		p.broadcast(model.OutboundMsg{MsgType: "stats", Stats: &snap})
+		p.broadcast(model.OutboundMsg{MsgType: "stats", Stats: &e.snap})
 	}
 }
 
@@ -481,6 +481,23 @@ func (p *Processor) sweepExpired() {
 			RemoveKey: key.Src + "→" + key.Dst,
 		})
 	}
+}
+
+// ForwardResource — resource_agent 스냅샷을 받아 hub로 브로드캐스트한다.
+//
+// main.go에서 직접 Broadcast를 호출하지 않고 Processor에 위임함으로써
+// main.go를 배선(wiring)만 하는 역할로 유지한다.
+// resCh가 닫히면(resource_agent 종료 시) goroutine이 자동으로 종료된다.
+func (p *Processor) ForwardResource(resCh <-chan model.ResourceSnapshot) {
+	go func() {
+		for snap := range resCh {
+			s := snap
+			log.Printf("[resource] %s cpu=%.2f%% mem=%dKB io_wait=%.2f%%",
+				s.ServiceName, s.CPUPct, s.MemCurrentBytes/1024, s.IOWaitPct)
+			p.broadcast(model.OutboundMsg{MsgType: "resource", Resource: &s})
+		}
+		log.Println("[stats] resource_agent 스트림 종료")
+	}()
 }
 
 // GetHistory — 현재 추적 중인 모든 연결의 히스토리를 반환한다.

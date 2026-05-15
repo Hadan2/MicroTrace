@@ -48,11 +48,12 @@ type ConnHistory struct {
 // 인라인으로 펼쳐지지 않고 통째로 생략되는 버그가 있다.
 // 명시적 필드를 쓰면 항상 예측 가능한 JSON 구조가 보장된다.
 type OutboundMsg struct {
-	MsgType string `json:"msg_type"` // "event" | "stats" | "remove" | "history"
+	MsgType string `json:"msg_type"` // "event" | "stats" | "remove" | "history" | "resource"
 
-	Event     *RawEvent     `json:"event,omitempty"`
-	Stats     *StatSnapshot `json:"stats,omitempty"`
-	RemoveKey string        `json:"remove_key,omitempty"`
+	Event     *RawEvent         `json:"event,omitempty"`
+	Stats     *StatSnapshot     `json:"stats,omitempty"`
+	Resource  *ResourceSnapshot `json:"resource,omitempty"`
+	RemoveKey string            `json:"remove_key,omitempty"`
 
 	// MsgType == "history" 일 때 채워진다. 신규 클라이언트 연결 시 한 번만 전송.
 	History []ConnHistory `json:"history,omitempty"`
@@ -66,6 +67,24 @@ type RawEvent struct {
 	DPort       uint16 `json:"dport"`
 	LatencyUs   uint64 `json:"latency_us"`
 	TimestampNs int64  `json:"timestamp_ns"` // collector 수신 시각 (Unix nanosecond)
+}
+
+// ResourceSnapshot — resource_agent가 1초마다 출력하는 컨테이너 자원 스냅샷
+//
+// cgroup v2 파일에서 직접 읽은 값이다. 누적 카운터(cpu_usage_usec, throttled_usec 등)는
+// resource_agent 내부에서 delta 계산 후 초당 비율(%)로 변환한다.
+type ResourceSnapshot struct {
+	ServiceName      string  `json:"service_name"`       // 컨테이너 이름(= 서비스 이름)
+	TimestampMs      int64   `json:"timestamp_ms"`        // Unix millisecond
+	CPUPct           float64 `json:"cpu_pct"`             // CPU 사용률 (0-100)
+	CPUThrottlePct   float64 `json:"cpu_throttle_pct"`    // CPU 스로틀 비율 (0-100)
+	MemCurrentBytes  uint64  `json:"mem_current_bytes"`   // 현재 메모리 사용량 (bytes)
+	MemLimitBytes    uint64  `json:"mem_limit_bytes"`     // 메모리 한도 (bytes, 0=무제한)
+	MemPressurePct   float64 `json:"mem_pressure_pct"`    // 메모리 high 이벤트 기반 압력 (0-100)
+	IOReadBytesPerS  uint64  `json:"io_read_bytes_per_s"` // 초당 읽기 바이트
+	IOWriteBytesPerS uint64  `json:"io_write_bytes_per_s"`// 초당 쓰기 바이트
+	IOWaitPct        float64 `json:"io_wait_pct"`         // IO wait 비율 (0-100, /proc/stat 기반)
+	OOMKillCount     uint64  `json:"oom_kill_count"`      // oom_kill 누적 횟수 (delta)
 }
 
 // StatSnapshot — 1초마다 stats 패키지가 생성하는 집계 결과
