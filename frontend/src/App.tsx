@@ -1,51 +1,102 @@
 import { useState } from 'react'
-import { ReactFlowProvider } from '@xyflow/react'
-import { useWebSocket } from './hooks/useWebSocket'
-import TopologyGraph from './components/TopologyGraph'
-import LatencyChart from './components/LatencyChart'
+import { useWebSocket }      from './hooks/useWebSocket'
+import { useMockData }       from './hooks/useMockData'
+import TopBar                from './components/TopBar'
+import GlobalMetrics         from './components/GlobalMetrics'
+import SectionHeader         from './components/SectionHeader'
+import ViewSwitcher          from './components/ViewSwitcher'
+import TopoGraph             from './components/TopoGraph'
+import ConnectionListView    from './components/ConnectionListView'
+import HeatmapMatrixView     from './components/HeatmapMatrixView'
+import DetailPanel           from './components/DetailPanel'
+import SpikeLog              from './components/SpikeLog'
 
-const WS_URL = `ws://${window.location.hostname}:9090/ws`
+const WS_URL   = `ws://${window.location.hostname}:9090/ws`
+const USE_MOCK = import.meta.env.VITE_MOCK === 'true'
+
+export type ViewMode = 'graph' | 'list' | 'matrix'
 
 export default function App() {
-  const { snapshots, history, connected } = useWebSocket(WS_URL)
-  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const ws   = useWebSocket(USE_MOCK ? '' : WS_URL)
+  const mock = useMockData()
+  const { snapshots, services, history, events, connected } = USE_MOCK ? mock : ws
+
+  const [selectedKey,  setSelected]     = useState<string | null>(null)
+  const [selectedNode, setSelectedNode] = useState<string | null>(null)
+  const [viewMode,     setViewMode]     = useState<ViewMode>('graph')
 
   const selectedSnap = selectedKey ? (snapshots[selectedKey] ?? null) : null
-  const selectedHistory = selectedKey ? (history[selectedKey] ?? []) : []
+  const selectedHist = selectedKey ? (history[selectedKey]   ?? [])   : []
+
+  const handleSelectEdge = (key: string | null) => {
+    setSelected(key)
+    setSelectedNode(null)
+  }
+  const handleSelectNode = (name: string | null) => {
+    setSelectedNode(name)
+    setSelected(null)
+  }
+
+  const edgeCount = Object.keys(snapshots).length
 
   return (
-    <div className="flex flex-col w-screen h-screen bg-white">
-      {/* 상단 바 */}
-      <header className="flex items-center justify-between px-5 py-3 border-b border-slate-200 shrink-0">
-        <h1 className="text-slate-800 font-semibold text-base tracking-tight">
-          MicroTrace
-        </h1>
-        <div className="flex items-center gap-2 text-xs">
-          <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
-          <span className="text-slate-500">{connected ? 'connected' : 'reconnecting...'}</span>
-        </div>
-      </header>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg-base)', overflowY: 'auto' }}>
+      <TopBar connected={connected} snapshots={snapshots} services={services} />
 
-      {/* 상단: 그래프 패널 */}
-      <div className="h-56 border-b border-slate-200 shrink-0">
-        <LatencyChart
-          historyKey={selectedKey}
-          history={selectedHistory}
-          snap={selectedSnap}
-        />
+      <GlobalMetrics snapshots={snapshots} services={services} />
+
+      <div style={{ display: 'flex', flex: 1, minHeight: 460, gap: 12, padding: 12 }}>
+        {/* 왼쪽: 토폴로지 패널 */}
+        <div style={{ flex: '0 0 60%', display: 'flex', flexDirection: 'column', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}>
+          <SectionHeader label="Service Topology" count={`${edgeCount} edges`}>
+            <ViewSwitcher value={viewMode} onChange={setViewMode} />
+          </SectionHeader>
+          <div style={{ flex: 1, overflow: 'hidden' }}>
+            {viewMode === 'graph'  && (
+              <TopoGraph
+                snapshots={snapshots}
+                services={services}
+                selectedKey={selectedKey}
+                selectedNode={selectedNode}
+                onSelect={handleSelectEdge}
+                onSelectNode={handleSelectNode}
+              />
+            )}
+            {viewMode === 'list' && (
+              <ConnectionListView
+                snapshots={snapshots}
+                selectedKey={selectedKey}
+                onSelect={handleSelectEdge}
+              />
+            )}
+            {viewMode === 'matrix' && (
+              <HeatmapMatrixView
+                snapshots={snapshots}
+                services={services}
+                selectedKey={selectedKey}
+                onSelect={handleSelectEdge}
+              />
+            )}
+          </div>
+        </div>
+
+        {/* 오른쪽: 디테일 패널 */}
+        <div style={{ flex: '0 0 calc(40% - 12px)', display: 'flex', flexDirection: 'column', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}>
+          <SectionHeader label="Detail · Root-cause Analysis" />
+          <DetailPanel
+            snap={selectedSnap}
+            history={selectedHist}
+            selectedNode={selectedNode}
+            nodeService={selectedNode ? (services[selectedNode] ?? null) : null}
+            onClose={() => { setSelected(null); setSelectedNode(null) }}
+          />
+        </div>
       </div>
 
-      {/* 하단: 토폴로지 */}
-      <div className="flex-1 overflow-hidden select-none">
-        <ReactFlowProvider>
-          {Object.keys(snapshots).length === 0 ? (
-            <div className="h-full flex items-center justify-center text-slate-400 text-sm">
-              {connected ? '트래픽 대기 중...' : 'collector에 연결 중...'}
-            </div>
-          ) : (
-            <TopologyGraph snapshots={snapshots} onEdgeSelect={setSelectedKey} />
-          )}
-        </ReactFlowProvider>
+      {/* 하단: 스파이크 로그 */}
+      <div style={{ background: 'var(--bg-surface)', borderTop: '1px solid var(--border)' }}>
+        <SectionHeader label="Spike Event Log" count={events.length > 0 ? String(events.length) : undefined} />
+        <SpikeLog events={events} onSelect={setSelected} />
       </div>
     </div>
   )

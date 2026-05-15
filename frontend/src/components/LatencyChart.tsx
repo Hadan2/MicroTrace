@@ -1,241 +1,151 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { createChart, LineSeries, type IChartApi, type ISeriesApi, type LineData, type UTCTimestamp, ColorType } from 'lightweight-charts'
+import { useRef, useEffect } from 'react'
 import type { HistoryPoint } from '../hooks/useWebSocket'
-import type { StatSnapshot } from '../types'
+import { fmtYLabel, fmtTime } from '../utils/format'
 
 interface Props {
-  historyKey: string | null
   history: HistoryPoint[]
-  snap: StatSnapshot | null
+  isSpike?: boolean
 }
 
-function formatUs(us: number): string {
-  if (us >= 1000) return `${(us / 1000).toFixed(1)}ms`
-  return `${Math.round(us)}µs`
-}
+const PAD = { top: 10, right: 14, bottom: 22, left: 56 }
 
-export default function LatencyChart({ historyKey, history, snap }: Props) {
-  const containerRef      = useRef<HTMLDivElement>(null)
-  const chartRef          = useRef<IChartApi | null>(null)
-  const latestSrttRef     = useRef<ISeriesApi<'Line'> | null>(null)
-  const avgRef            = useRef<ISeriesApi<'Line'> | null>(null)
-  const p50Ref            = useRef<ISeriesApi<'Line'> | null>(null)
-  const p95Ref            = useRef<ISeriesApi<'Line'> | null>(null)
-  const p99Ref            = useRef<ISeriesApi<'Line'> | null>(null)
-  const jitterLineRef     = useRef<ISeriesApi<'Line'> | null>(null)
-  const isLiveRef         = useRef(true)
-  const [isLive, setIsLive] = useState(true)
+export default function LatencyChart({ history, isSpike }: Props) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
 
-  const goLive = useCallback(() => {
-    isLiveRef.current = true
-    setIsLive(true)
-    // 최신 데이터로 스크롤
-    chartRef.current?.timeScale().scrollToRealTime()
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const dpr = window.devicePixelRatio || 1
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+    // 논리 크기 (CSS px 기준으로 계산)
+    const W = canvas.width  / dpr
+    const H = canvas.height / dpr
+
+    const pts = history.slice(-180)
+    if (pts.length < 2) {
+      ctx.clearRect(0, 0, W, H)
+      ctx.fillStyle = '#94a3b8'
+      ctx.font = '11px Inter, system-ui'
+      ctx.textAlign = 'center'
+      ctx.fillText('데이터 수집 중…', W / 2, H / 2)
+      return
+    }
+    const pw = W - PAD.left - PAD.right
+    const ph = H - PAD.top  - PAD.bottom
+
+    // Y 스케일
+    const allVals = pts.flatMap(p => [p.avg_us, p.p50_us, p.p95_us, p.p99_us])
+    const rawMax  = Math.max(...allVals)
+    const rawMin  = Math.min(...allVals)
+    const yMax = Math.max(rawMax * 1.15, rawMin * 0.85 + 500)
+    const yMin = Math.max(0, rawMin * 0.85)
+    const yRange = yMax - yMin || 1
+
+    const toX = (i: number) => PAD.left + (i / (pts.length - 1)) * pw
+    const toY = (v: number) => PAD.top + ph - ((v - yMin) / yRange) * ph
+
+    // 배경
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, W, H)
+
+    // 스파이크 오버레이
+    if (isSpike) {
+      ctx.fillStyle = 'rgba(220,38,38,0.04)'
+      ctx.fillRect(PAD.left + pw * 0.82, PAD.top, pw * 0.18, ph)
+    }
+
+    // Jitter band (P50 ± jitter/2)
+    ctx.fillStyle = 'rgba(37,99,235,0.08)'
+    ctx.beginPath()
+    pts.forEach((p, i) => {
+      const x = toX(i)
+      const y = toY(p.p50_us + p.jitter_us / 2)
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+    })
+    for (let i = pts.length - 1; i >= 0; i--) {
+      ctx.lineTo(toX(i), toY(Math.max(yMin, pts[i].p50_us - pts[i].jitter_us / 2)))
+    }
+    ctx.closePath()
+    ctx.fill()
+
+    // Grid lines (Y)
+    ctx.strokeStyle = '#f1f5f9'
+    ctx.lineWidth = 1
+    for (let i = 0; i <= 3; i++) {
+      const y = PAD.top + (ph / 3) * i
+      ctx.beginPath()
+      ctx.moveTo(PAD.left, y)
+      ctx.lineTo(PAD.left + pw, y)
+      ctx.stroke()
+      const val = yMax - (yRange / 3) * i
+      ctx.fillStyle = '#94a3b8'
+      ctx.font = '9px JetBrains Mono, monospace'
+      ctx.textAlign = 'right'
+      ctx.fillText(fmtYLabel(val), PAD.left - 4, y + 3)
+    }
+
+    // 라인 그리기
+    function drawLine(getter: (p: HistoryPoint) => number, color: string, width: number, dash?: number[]) {
+      ctx!.strokeStyle = color
+      ctx!.lineWidth   = width
+      ctx!.setLineDash(dash ?? [])
+      ctx!.beginPath()
+      pts.forEach((p, i) => {
+        const x = toX(i)
+        const y = toY(getter(p))
+        i === 0 ? ctx!.moveTo(x, y) : ctx!.lineTo(x, y)
+      })
+      ctx!.stroke()
+    }
+
+    drawLine(p => p.avg_us,  '#2563eb', 1.2, [4, 3])
+    drawLine(p => p.p50_us,  '#16a34a', 1.8)
+    drawLine(p => p.p95_us,  '#d97706', 1.8)
+    drawLine(p => p.p99_us,  '#ea580c', 2.4)
+
+    // X axis labels
+    const xTicks = [0, Math.floor(pts.length / 2), pts.length - 1]
+    ctx.fillStyle = '#94a3b8'
+    ctx.font = '9px JetBrains Mono, monospace'
+    xTicks.forEach(i => {
+      if (!pts[i]) return
+      const x = toX(i)
+      const label = fmtTime(pts[i].time)
+      ctx.textAlign = i === 0 ? 'left' : i === pts.length - 1 ? 'right' : 'center'
+      ctx.fillText(label, x, PAD.top + ph + 14)
+    })
+
+    // Border
+    ctx.strokeStyle = '#e2e8f0'
+    ctx.lineWidth = 1
+    ctx.setLineDash([])
+    ctx.strokeRect(PAD.left, PAD.top, pw, ph)
+  }, [history, isSpike])
+
+  // ResizeObserver로 캔버스 크기 동기화 (DPR 적용으로 고해상도 렌더링)
+  const containerRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const canvas = canvasRef.current
+      if (!canvas || !el) return
+      const dpr = window.devicePixelRatio || 1
+      canvas.width  = el.clientWidth  * dpr
+      canvas.height = el.clientHeight * dpr
+      canvas.dispatchEvent(new Event('resize'))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
   }, [])
 
-  // 차트 생성 — historyKey 바뀔 때만
-  useEffect(() => {
-    if (!containerRef.current || !historyKey) return
-
-    chartRef.current?.remove()
-    chartRef.current = null
-    isLiveRef.current = true
-    setIsLive(true)
-
-    const chart = createChart(containerRef.current, {
-      width:  containerRef.current.clientWidth,
-      height: containerRef.current.clientHeight,
-      layout: {
-        background: { type: ColorType.Solid, color: '#ffffff' },
-        textColor: '#94a3b8',
-        fontSize: 11,
-      },
-      grid: {
-        vertLines: { color: '#f1f5f9' },
-        horzLines: { color: '#f1f5f9' },
-      },
-      timeScale: {
-        timeVisible: true,
-        secondsVisible: true,
-        borderColor: '#e2e8f0',
-        fixLeftEdge: false,
-        fixRightEdge: false,
-      },
-      rightPriceScale: {
-        borderColor: '#e2e8f0',
-      },
-      localization: {
-        priceFormatter: (v: number) => formatUs(v),
-        timeFormatter: (ts: number) => {
-          const d = new Date(ts * 1000)
-          const month = (d.getMonth() + 1).toString().padStart(2, '0')
-          const day   = d.getDate().toString().padStart(2, '0')
-          const hh    = d.getHours().toString().padStart(2, '0')
-          const mm    = d.getMinutes().toString().padStart(2, '0')
-          const ss    = d.getSeconds().toString().padStart(2, '0')
-          return `${month}/${day} ${hh}:${mm}:${ss}`
-        },
-      },
-      crosshair: {
-        mode: 1,
-      },
-      handleScale: true,
-      handleScroll: true,
-    })
-
-    // 사용자가 스크롤/줌하면 Live 모드 해제
-    chart.timeScale().subscribeVisibleTimeRangeChange(() => {
-      if (isLiveRef.current) {
-        // scrollToRealTime 호출로 인한 이벤트는 무시
-        return
-      }
-    })
-
-    chart.subscribeClick(() => {
-      // 클릭은 무시
-    })
-
-    // 드래그 시작 감지 — Live 해제
-    containerRef.current.addEventListener('mousedown', () => {
-      if (isLiveRef.current) {
-        isLiveRef.current = false
-        setIsLive(false)
-      }
-    })
-
-    const seriesOpts = { lineWidth: 2 as const, lastValueVisible: false, priceLineVisible: false }
-    latestSrttRef.current = chart.addSeries(LineSeries, { ...seriesOpts, color: '#2563eb', title: 'SRTT', lineWidth: 3 })
-    avgRef.current = chart.addSeries(LineSeries, { ...seriesOpts, color: '#94a3b8', title: 'AVG', lineStyle: 1 })
-    p50Ref.current = chart.addSeries(LineSeries, { ...seriesOpts, color: '#22c55e', title: 'P50' })
-    p95Ref.current = chart.addSeries(LineSeries, { ...seriesOpts, color: '#eab308', title: 'P95' })
-    p99Ref.current = chart.addSeries(LineSeries, { ...seriesOpts, color: '#f97316', title: 'P99' })
-    jitterLineRef.current = chart.addSeries(LineSeries, {
-      ...seriesOpts,
-      color: '#6366f1',
-      title: 'Jitter',
-      lineStyle: 2,
-      lineWidth: 2,
-    })
-
-    chartRef.current = chart
-
-    // 리사이즈
-    const ro = new ResizeObserver(() => {
-      if (containerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({
-          width:  containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
-        })
-      }
-    })
-    ro.observe(containerRef.current)
-
-    return () => {
-      ro.disconnect()
-      chart.remove()
-      chartRef.current = null
-    }
-  }, [historyKey])
-
-  // 데이터 업데이트 — history 바뀔 때마다
-  useEffect(() => {
-    if (!chartRef.current || !latestSrttRef.current || !avgRef.current || !p50Ref.current || !p95Ref.current || !p99Ref.current) return
-    if (!jitterLineRef.current) return
-    if (history.length === 0) return
-
-    // Lightweight Charts는 time을 UTC로 해석하므로 로컬 offset을 더해서 보정
-    const tzOffsetSec = -new Date().getTimezoneOffset() * 60
-
-    // 초 단위로 변환 후 중복 time 제거 (마지막 값 우선)
-    const deduped = new Map<number, HistoryPoint>()
-    for (const h of history) {
-      deduped.set(Math.floor(h.time / 1000) + tzOffsetSec, h)
-    }
-    const sorted = [...deduped.entries()]
-      .sort((a, b) => a[0] - b[0])
-
-    const toLineData = (fn: (h: HistoryPoint) => number): LineData[] =>
-      sorted.map(([sec, h]) => ({
-        time: sec as UTCTimestamp,
-        value: fn(h),
-      }))
-
-    latestSrttRef.current.setData(toLineData(h => h.latest_srtt_us))
-    avgRef.current.setData(toLineData(h => h.avg_us))
-    p50Ref.current.setData(toLineData(h => h.p50_us))
-    p95Ref.current.setData(toLineData(h => h.p95_us))
-    p99Ref.current.setData(toLineData(h => h.p99_us))
-    jitterLineRef.current.setData(toLineData(h => h.jitter_us))
-
-    // Live 모드면 항상 최신으로 스크롤
-    if (isLiveRef.current) {
-      chartRef.current.timeScale().scrollToRealTime()
-    }
-  }, [history])
-
-  if (!historyKey) {
-    return (
-      <div className="h-full flex items-center justify-center text-slate-400 text-sm">
-        토폴로지에서 엣지를 클릭하면 그래프가 표시됩니다
-      </div>
-    )
-  }
-
   return (
-    <div className="h-full flex flex-col px-5 py-3 gap-2">
-      {/* 헤더 */}
-      <div className="flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="text-slate-800 font-semibold text-sm">{historyKey}</span>
-          {snap?.is_spike && (
-            <span className="text-xs bg-red-50 border border-red-300 text-red-600 px-2 py-0.5 rounded-full">
-              ⚠ SPIKE
-            </span>
-          )}
-          {isLive ? (
-            <span className="flex items-center gap-1 text-xs text-green-600">
-              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block" />
-              LIVE
-            </span>
-          ) : (
-            <button
-              onClick={goLive}
-              className="text-xs bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-600 px-2 py-0.5 rounded-full"
-            >
-              ▶ Live 복귀
-            </button>
-          )}
-        </div>
-        {/* 현재값 뱃지 */}
-        <div className="flex gap-3 text-xs">
-          {[
-            { label: 'AVG', value: snap?.avg_us, color: '#94a3b8' },
-            { label: 'SRTT', value: snap?.latest_srtt_us, color: '#2563eb' },
-            { label: 'P50', value: snap?.p50_us, color: '#22c55e' },
-            { label: 'P95', value: snap?.p95_us, color: '#eab308' },
-            { label: 'P99', value: snap?.p99_us, color: snap?.is_spike ? '#ef4444' : '#f97316' },
-            {
-              label: 'Jitter',
-              value: snap?.jitter_us,
-              // 0~1ms: 회색(안정) / 1~5ms: 노랑(주의) / 5ms 이상: 빨강(불안정)
-              color: snap == null ? '#94a3b8'
-                : snap.jitter_us >= 5000 ? '#ef4444'
-                : snap.jitter_us >= 1000 ? '#eab308'
-                : '#94a3b8',
-            },
-          ].map(({ label, value, color }) => (
-            <div key={label} className="flex flex-col items-center">
-              <span style={{ color }} className="font-bold text-base">
-                {value != null ? formatUs(value) : '—'}
-              </span>
-              <span className="text-slate-500">{label}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* 차트 영역 */}
-      <div ref={containerRef} className="flex-1 min-h-0 w-full" />
+    <div ref={containerRef} style={{ width: '100%', height: '100%' }}>
+      <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }}/>
     </div>
   )
 }
