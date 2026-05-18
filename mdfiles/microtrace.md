@@ -1,6 +1,6 @@
 # 🔬 MicroTrace — eBPF-based Latency Root-Cause Profiler
 
-> **"느린 호출이 생겼을 때, 네트워크인지 CPU인지 IO인지 가장 먼저 좁혀주는 eBPF 기반 실시간 진단 도구"**
+> **"latency spike가 왜 났는지 — 네트워크인지 CPU인지 메모리인지 — 가장 빠르게 좁혀주는 eBPF 기반 root-cause 진단 도구"**
 
 ---
 
@@ -16,19 +16,22 @@
 > 1분 평균으로 집계하면 이 spike는 완전히 묻히며, 엔지니어는 "모니터링에는 문제 없는데 왜 에러가 나지?"라는 상황에 놓이게 됩니다.
 > (참고: Brendan Gregg — "Latency is not a single number, it's a distribution")
 
-**MicroTrace**는 이러한 문제를 해결하기 위해, 기존 상시 모니터링 시스템을 **대체**하는 것이 아니라 **보완**하는 도구로 설계됩니다. 목표는 "이 호출이 왜 느린가?"라는 질문에 대해, 네트워크 지표와 서버 리소스 지표를 같은 시간축에서 보고 **원인 후보를 빠르게 좁혀주는 것**입니다.
+**MicroTrace**는 Datadog 같은 상시 모니터링 플랫폼을 대체하는 도구가 아닙니다. 포지션은 명확합니다: **"latency spike가 발생했을 때, 원인을 가장 빠르게 좁혀주는 진단 도구"**.
 
-운영체제 커널의 **eBPF** 기술을 활용하면 애플리케이션 코드 수정 없이 **낮은 오버헤드(low-overhead)**로 서비스 간 latency, TCP 재전송, DNS/TCP 이벤트를 추적할 수 있습니다. 여기에 CPU throttling, IO wait, memory pressure 같은 시스템 지표를 결합하여, "네트워크 문제인가, 서버 리소스 문제인가, 외부 의존성 문제인가"를 빠르게 가르는 것이 MicroTrace의 핵심 가치입니다.
+주인공은 **latency**입니다. 서비스 간 RTT spike를 eBPF로 감지하고, 그 시점의 서버 리소스(CPU throttle, memory pressure, OOM)를 증거로 제시해서 "네트워크 문제인가, CPU 문제인가, 메모리 문제인가, 외부 의존성 문제인가"를 자동으로 좁혀줍니다.
+
+리소스 수집은 이 목적을 위한 수단입니다. Datadog처럼 모든 지표를 헤비하게 수집하지 않고, **cause 판별에 직접 필요한 지표만** 수집합니다(CPU throttle_pct, OOM kill count, memory pressure). 설치 복잡도를 낮추고 오버헤드를 최소화하기 위한 의도적인 선택입니다.
 
 ---
 
 ## 2. 목표
 
 1. **서비스 간 latency spike 감지** — Keep-Alive/Connection Pooling 환경에서도 요청 지연 징후를 놓치지 않음
-2. **서버 리소스 상시 관측** — CPU throttling, IO wait, memory pressure 등 원인 판단에 필요한 지표를 함께 수집
-3. **원인 후보 자동 축소** — spike 발생 시 네트워크 문제인지 서버 리소스 문제인지 우선 분류
-4. **코드 수정 없는 진단** — SDK 삽입이나 애플리케이션 재배포 없이 즉시 관측 시작
-5. **낮은 시스템 오버헤드** — 운영 환경에 부담 없이 상시 투입 가능
+2. **원인 후보 자동 축소** — spike 발생 시 네트워크/CPU/메모리/외부 의존성 중 원인을 자동 분류
+3. **cause 판별용 리소스 수집** — CPU throttle, OOM kill, memory pressure 등 원인 판단에 필요한 지표만 수집 (Datadog식 전수 수집 아님)
+4. **spike 이력 보존** — 재시작 후에도 과거 spike와 그 시점 리소스를 조회할 수 있도록 SQLite에 7일치 보존
+5. **코드 수정 없는 진단** — SDK 삽입이나 애플리케이션 재배포 없이 즉시 관측 시작
+6. **낮은 시스템 오버헤드** — 운영 환경에 부담 없이 상시 투입 가능
 
 ---
 
@@ -43,9 +46,9 @@
 | 이벤트 전달 지연 (커널 → 대시보드) | < 100ms | 타임스탬프 차이 측정 |
 | 동시 추적 가능 소켓 수 | 1,000+ | 부하 테스트로 검증 |
 | Agent 메모리 사용량 | < 50MB | `RSS` 기준 측정 |
-| Spike 이벤트 로그 보존 | 최근 1시간 (파일 덤프) | 로그 파일 크기/시간 확인 |
+| Spike 이력 보존 | 7일 (SQLite) | DB 파일 크기 / 쿼리 응답시간 확인 |
 
-> **참고:** 위 수치는 Phase 2 완료 시점에 실측하여 기획서에 결과를 업데이트할 예정입니다.
+> **참고:** NFR 수치는 Phase 4 EC2 검증 시 실측하여 업데이트할 예정입니다.
 
 ---
 
@@ -65,7 +68,7 @@
 |---|---|---|
 | **Agent (수집기)** | C, eBPF (libbpf) + 시스템 메트릭 수집 | 서비스 간 latency/TCP 이벤트와 CPU throttling, IO wait, memory pressure를 상시 감시. 필요 시 더 깊은 probe 활성화. |
 | **Collector (백엔드)** | Go (Goroutine, Channel) | 에이전트 이벤트를 상관 분석하여 spike 시점의 원인 후보를 정리하고 WebSocket/API로 전달. |
-| **Database** | In-Memory Cache + Spike Log | 최근 window와 spike 전후 지표를 보존. 장기 저장보다 단기 진단에 최적화. |
+| **Database** | In-Memory + SQLite | 실시간 처리는 메모리. 집계된 StatSnapshot·ResourceSnapshot을 60초 배치로 SQLite에 저장, 7일 보존. 외부 DB 서버 없음. |
 | **Dashboard (클라이언트)** | React Web (TypeScript) | raw stream 전체가 아니라 spike timeline, 상관관계 그래프, 원인 후보를 시각화. |
 
 ```
@@ -97,7 +100,7 @@
 | **C + libbpf (CO-RE)** | BCC 대비 런타임 의존성 제거, 배포 용이성 확보 |
 | **Go Collector** | goroutine/channel 기반 비동기 처리와 상관 분석 로직 구현에 적합. 크로스 컴파일 용이 |
 | **React Web (TypeScript)** | 브라우저만 있으면 로컬/EC2/K8s 모든 환경에서 URL 하나로 접속 가능. Wails는 데스크톱 앱이라 다중 서버 환경에서 팀원 공유가 불가능하고, 서버 배포 시 SSH 터널링이 필요해 타겟 2·3 환경과 맞지 않음. |
-| **인메모리 + 파일 덤프** | TSDB(InfluxDB 등) 의존성 제거로 설치 복잡도 최소화. spike 전후 고해상도 데이터만 선별 저장 |
+| **SQLite (로컬 단일 파일)** | 외부 DB 서버 없이 영속성 확보. Prometheus/Netdata처럼 인메모리 버퍼 → 60초 배치 INSERT 패턴으로 쓰기 병목 없음. 원시 이벤트가 아닌 집계 결과만 저장해서 크기 최소화 (~100MB/7일). |
 
 ---
 
@@ -180,7 +183,7 @@ eBPF를 사용하는 더 큰 이유:
 * **tracepoint 동적 offset 파싱:** `/sys/kernel/debug/tracing/events/` format 파일을 런타임에 파싱하여 커널 버전 변경에 자동 대응.
 * **eBPF Ring Buffer:** 커널↔유저 공간 간 이벤트 전달 오버헤드 최소화.
 * **실시간 상관 분석:** Go collector가 spike 시점의 네트워크/리소스 지표를 묶어 원인 후보를 생성.
-* **Spike 이벤트 파일 덤프:** 인메모리 휘발성을 보완하여 spike 전후 window를 JSON Lines 형식으로 저장. 소급 분석 지원.
+* **SQLite 배치 저장:** 인메모리 휘발성을 보완. 집계된 StatSnapshot·ResourceSnapshot을 60초마다 SQLite에 배치 INSERT, 7일 자동 보존. 외부 DB 서버 불필요. "어젯밤 spike"를 재시작 후에도 조회 가능.
 
 ---
 
@@ -222,39 +225,34 @@ eBPF를 사용하는 더 큰 이유:
 
 ---
 
-### Phase 2 — sock_ops 전환 + 상관관계 기초 수집 (예상: 4~6주)
+### ✅ Phase 2 — sock_ops 전환 + 리소스 파이프라인 (완료)
 
-- kprobe → sock_ops 방식으로 전환
-  - 소켓 단위 TCP latency 측정
-  - Keep-Alive 연결 위의 요청 단위 추적
-  - cgroup 기반 서비스 선택적 적용
-- 컨테이너별 CPU throttling / IO wait / memory pressure 수집
-- spike 전후 window 저장 및 원인 후보 규칙 추가
-- agent → collector 통신: 바이너리 직렬화로 교체 (현재 JSON 임시)
+- kprobe → sock_ops 전환 (Keep-Alive 환경 latency 측정)
+- resource_agent: cgroup v2 기반 CPU throttle / memory pressure / OOM kill 수집
+- WebSocket 파이프라인: collector → hub → React 대시보드 실시간 스트리밍
+- cause_kind 자동 판별: spike 발생 시 cpu/memory/network/external 분류
 
 ---
 
-### Phase 3 — 대시보드 + drill-down 분석 (예상: 4~6주)
+### ✅ Phase 3 — 대시보드 구현 (완료)
 
-- Go collector에 WebSocket 서버 추가
-- React Web 대시보드 구현
-  - 서비스 토폴로지 화면 (노드: 서비스, 엣지: 연결, 색상: 레이턴시 수준)
-  - 실시간 latency 그래프 (RTT 시계열)
-  - CPU / IO / latency 동기화 타임라인
-  - spike timeline + 원인 후보 표시
-  - 엣지/노드 클릭 → 상세 화면
+- React Web 대시보드: 서비스 토폴로지, latency 시계열 그래프, DetailPanel
+- spike 시점 CauseCandidate Banner, CausePill
+- 차트 pan/zoom, 연결별 히스토리 전송
 
-### Phase 4 — 동적 kprobe/uprobe + 클라우드 검증 (장기, 예상: 6~8주)
+---
 
-- spike 감지 시 kprobe 자동 활성화
-  - tcp_transmit_skb, finish_task_switch, vfs_write
-  - 커널 레벨 원인 후보 자동 판별
-- uprobe 언어별 지원 (Go 런타임부터 시작)
-  - goroutine 스케줄링 지연 추적
-  - 함수 단위 실행 시간 측정
-- EC2 + Google Microservices Demo 배포
-- wrk 부하 테스트 및 spike 원인 자동 추적 검증
-- NFR 목표 수치 실측 및 기획서 업데이트
+### Phase 4 — 영속성 + EC2 검증 (진행 예정)
+
+- **SQLite 영속성:** StatSnapshot·ResourceSnapshot 7일 보존. 60초 배치 INSERT. 외부 DB 없음.
+- **StaticResolver:** IP→서비스 이름을 설정 파일로 매핑. EC2 멀티호스트 지원.
+- **EC2 배포:** Google Microservices Demo 또는 자체 testenv를 EC2에 올려서 실제 VPC 네트워크 지연 측정.
+- **NFR 실측:** wrk 부하 테스트로 "Agent CPU < 1%, 이벤트 전달 < 100ms" 목표치 검증.
+
+### Phase 5 — 동적 kprobe/uprobe (장기)
+
+- spike 감지 시 kprobe 자동 활성화 (tcp_transmit_skb, finish_task_switch, vfs_write)
+- uprobe Go 런타임 지원 (goroutine 스케줄링 지연, 함수 단위 실행 시간)
 
 ---
 

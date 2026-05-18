@@ -20,7 +20,8 @@ Study/
 ├── infra/
 │   ├── linux.md          ← cgroup v2, /proc/stat, /sys/fs/cgroup
 │   ├── docker.md
-│   └── cause_detection.md ← CPU throttle, PSI, memory.events, io_wait 신호 품질 비교
+│   ├── cause_detection.md ← CPU throttle, PSI, memory.events, io_wait 신호 품질 비교
+│   └── sqlite.md         ← SQLite 기초, WAL 모드, 배치 INSERT, TTL, 인덱스
 ├── project/
 │   └── flow.md        ← 빌드/실행/데이터 흐름 (상세)
 └── Errors/            ← 날짜별 트러블슈팅
@@ -98,14 +99,19 @@ WebSocket 메시지 타입: `stats` / `event` / `resource` / `remove` / `history
 
 ## 현재 상태 (2026-05-18 기준)
 
-- **완료:** 전체 수집 파이프라인 (latency + resource), 대시보드 UI, EXT 배지 분류, 백엔드 리팩토링, 차트 pan/zoom
-- **진행 중:** `cause_kind` 자동 판별 (Issue #3) — spike 발생 시 CPU throttle/Memory pressure/Network 중 원인 후보 자동 분류
+- **완료:** 전체 수집 파이프라인 (latency + resource), 대시보드 UI, cause_kind 자동 판별, 차트 pan/zoom
+- **다음:** SQLite 영속성 + EC2 검증 (Phase 4)
 - 상세: `mdfiles/todo.md`
 
 ---
 
-## Phase 3 — 동적 kprobe + 클라우드 검증 🔲 미착수
+## Phase 4 — 영속성 + EC2 검증 🔲 미착수
+
+- SQLite 영속성: StatSnapshot·ResourceSnapshot 7일 보존, 60초 배치 INSERT
+- StaticResolver: IP→서비스 이름 설정 파일 기반 매핑 (EC2 멀티호스트)
+- EC2 배포 + wrk 부하 테스트 + NFR 수치 실측
+
+## Phase 5 — 동적 kprobe/uprobe 🔲 장기
 
 - spike 감지 시 kprobe 자동 활성화 (tcp_transmit_skb, finish_task_switch, vfs_write)
-- EC2 + Google Microservices Demo + wrk 부하 테스트
 - uprobe (Go 런타임 goroutine 스케줄러 추적)

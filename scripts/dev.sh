@@ -42,6 +42,12 @@ cleanup() {
     fi
   done
 
+  # sudo로 실행된 collector(root 프로세스)는 PIDS에 안 잡힘.
+  # 프로세스 이름으로 직접 찾아서 종료한다.
+  sudo pkill -TERM -f "collector/.*go run\|go-build.*collector" 2>/dev/null || true
+  sudo pkill -TERM -f "tcp_trace" 2>/dev/null || true
+  sudo pkill -TERM -f "resource_agent" 2>/dev/null || true
+
   if [[ "${KEEP_CONTAINERS:-0}" != "1" ]]; then
     if [[ "${#COMPOSE_CMD[@]}" -gt 0 ]]; then
       "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" down --remove-orphans >/dev/null 2>&1 || true

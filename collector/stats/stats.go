@@ -224,10 +224,18 @@ func (s *connStats) isSpike(latestUs uint64) (bool, uint64) {
 // 패키지 간 순환 의존을 방지한다.
 type BroadcastFn func(model.OutboundMsg)
 
+// StoreFn — store.WriteConn / store.WriteResource와 같은 시그니처.
+// stats가 store 패키지를 직접 임포트하지 않고 함수 포인터로만 받는다.
+type StoreFn struct {
+	Conn     func(model.StatSnapshot)
+	Resource func(model.ResourceSnapshot)
+}
+
 // Processor — 이벤트 처리 + 집계 + 스냅샷 발행을 담당
 type Processor struct {
 	resolver  resolver.ServiceResolver
 	broadcast BroadcastFn
+	store     StoreFn
 
 	mu        sync.Mutex
 	conns     map[ConnKey]*connStats
@@ -239,10 +247,12 @@ type Processor struct {
 //
 // r: IP → 서비스 이름 변환기 (DockerResolver or StaticResolver)
 // fn: 완성된 OutboundMsg를 WebSocket으로 내보내는 함수 (hub.Broadcast)
-func New(r resolver.ServiceResolver, fn BroadcastFn) *Processor {
+// s: SQLite 저장 콜백 (nil이면 저장 비활성화)
+func New(r resolver.ServiceResolver, fn BroadcastFn, s StoreFn) *Processor {
 	return &Processor{
 		resolver:  r,
 		broadcast: fn,
+		store:     s,
 		conns:     make(map[ConnKey]*connStats),
 		flows:     make(map[FlowKey]*flowState),
 		resources: make(map[string]*model.ResourceSnapshot),
@@ -409,6 +419,9 @@ func (p *Processor) publishSnapshots() {
 				e.snap.SrcService, e.snap.DstService, e.snap.LatestSRTTUs, e.snap.SpikeThresholdUs)
 		}
 		p.broadcast(model.OutboundMsg{MsgType: "stats", Stats: &e.snap})
+		if p.store.Conn != nil {
+			p.store.Conn(e.snap)
+		}
 	}
 }
 
@@ -550,6 +563,9 @@ func (p *Processor) ForwardResource(resCh <-chan model.ResourceSnapshot) {
 			p.mu.Unlock()
 
 			p.broadcast(model.OutboundMsg{MsgType: "resource", Resource: &s})
+			if p.store.Resource != nil {
+				p.store.Resource(s)
+			}
 		}
 		log.Println("[stats] resource_agent 스트림 종료")
 	}()

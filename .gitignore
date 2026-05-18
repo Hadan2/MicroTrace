@@ -1,0 +1,11 @@
+# SQLite DB 파일 (런타임 생성, 커밋 불필요)
+collector/microtrace.db
+collector/microtrace.db-shm
+collector/microtrace.db-wal
+
+# 빌드 바이너리
+agent/tcp_trace
+agent/tcp_trace.bpf.o
+agent/tcp_trace.skel.h
+resource_agent/resource_agent
+collector/collector
