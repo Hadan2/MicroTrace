@@ -217,6 +217,65 @@ func (s *Store) deleteExpired() {
 	}
 }
 
+// HistoryRow — conn_stats 조회 결과 한 행
+type HistoryRow struct {
+	Ts          int64  `json:"ts"`
+	P50Us       int64  `json:"p50_us"`
+	P95Us       int64  `json:"p95_us"`
+	P99Us       int64  `json:"p99_us"`
+	AvgUs       int64  `json:"avg_us"`
+	JitterUs    int64  `json:"jitter_us"`
+	IsSpike     bool   `json:"is_spike"`
+	CauseKind   string `json:"cause_kind"`
+	CauseSignal string `json:"cause_signal"`
+}
+
+// QueryHistory — src→dst 연결의 과거 데이터를 from 이후부터 조회한다.
+func (s *Store) QueryHistory(src, dst string, from time.Time) ([]HistoryRow, error) {
+	rows, err := s.db.Query(`
+		SELECT ts, p50_us, p95_us, p99_us, avg_us, jitter_us, is_spike, cause_kind, cause_signal
+		FROM conn_stats
+		WHERE src = ? AND dst = ? AND ts >= ?
+		ORDER BY ts ASC
+	`, src, dst, from.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []HistoryRow
+	for rows.Next() {
+		var r HistoryRow
+		var isSpike int
+		if err := rows.Scan(&r.Ts, &r.P50Us, &r.P95Us, &r.P99Us, &r.AvgUs, &r.JitterUs,
+			&isSpike, &r.CauseKind, &r.CauseSignal); err != nil {
+			continue
+		}
+		r.IsSpike = isSpike == 1
+		result = append(result, r)
+	}
+	return result, nil
+}
+
+// ListConnections — DB에 기록된 연결 목록(src, dst 쌍)을 반환한다.
+func (s *Store) ListConnections() ([][2]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT src, dst FROM conn_stats ORDER BY src, dst`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result [][2]string
+	for rows.Next() {
+		var src, dst string
+		if err := rows.Scan(&src, &dst); err != nil {
+			continue
+		}
+		result = append(result, [2]string{src, dst})
+	}
+	return result, nil
+}
+
 // Close — DB 연결을 닫는다.
 func (s *Store) Close() {
 	if err := s.db.Close(); err != nil {

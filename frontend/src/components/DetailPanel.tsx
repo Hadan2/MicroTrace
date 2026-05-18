@@ -1,9 +1,20 @@
-import type { StatSnapshot, ServiceSnapshot } from '../types'
-import type { HistoryPoint } from '../hooks/useWebSocket'
+import { useState, useEffect, useCallback } from 'react'
+import type { StatSnapshot, ServiceSnapshot, HistoryPoint } from '../types'
 import { fmtUs, latencyStatus, STATUS_COLOR } from '../utils/format'
 import { CAUSE_META } from '../constants/causes'
 import LatencyChart  from './LatencyChart'
 import ResourceChart from './ResourceChart'
+
+type RangeKey = '1h' | '6h' | '24h' | '7d'
+
+const RANGE_LABELS: { key: RangeKey; label: string }[] = [
+  { key: '1h',  label: '1h'  },
+  { key: '6h',  label: '6h'  },
+  { key: '24h', label: '24h' },
+  { key: '7d',  label: '7d'  },
+]
+
+const COLLECTOR_BASE = `http://${window.location.hostname}:9090`
 
 interface Props {
   snap: StatSnapshot | null
@@ -14,6 +25,51 @@ interface Props {
 }
 
 export default function DetailPanel({ snap, history, selectedNode, nodeService, onClose }: Props) {
+  const [range, setRange] = useState<RangeKey | null>(null)  // null = Live
+  const [dbHistory, setDbHistory] = useState<HistoryPoint[] | null>(null)
+
+  const fetchHistory = useCallback(async (src: string, dst: string, r: RangeKey) => {
+    try {
+      const res = await fetch(`${COLLECTOR_BASE}/api/history?src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&range=${r}`)
+      const rows = await res.json()
+      // API 응답을 HistoryPoint 형태로 변환
+      setDbHistory(rows.map((row: {
+        ts: number; p50_us: number; p95_us: number; p99_us: number;
+        avg_us: number; jitter_us: number
+      }) => ({
+        time: row.ts,
+        latest_srtt_us: row.p99_us,
+        avg_us: row.avg_us,
+        p50_us: row.p50_us,
+        p95_us: row.p95_us,
+        p99_us: row.p99_us,
+        jitter_us: row.jitter_us,
+      })))
+    } catch (e) {
+      console.error('[history api]', e)
+    }
+  }, [])
+
+  // 연결이 바뀌면 range/dbHistory 초기화
+  useEffect(() => {
+    setRange(null)
+    setDbHistory(null)
+  }, [snap?.src_service, snap?.dst_service])
+
+  const handleRange = (r: RangeKey) => {
+    if (!snap) return
+    setRange(r)
+    fetchHistory(snap.src_service, snap.dst_service, r)
+  }
+
+  const handleLive = () => {
+    setRange(null)
+    setDbHistory(null)
+  }
+
+  // 보여줄 히스토리: range 선택 시 DB 데이터, 아니면 실시간
+  const displayHistory = range !== null && dbHistory !== null ? dbHistory : history
+
   // 노드 선택 뷰
   if (selectedNode) {
     return <NodePanel name={selectedNode} svc={nodeService} onClose={onClose} />
@@ -164,15 +220,24 @@ export default function DetailPanel({ snap, history, selectedNode, nodeService, 
 
       {/* ⑥ Latency Chart */}
       <div style={{ padding: '0 14px 6px', flexShrink: 0 }}>
-        <ChartHeader title="Latency" legend={[
-          { color: '#2563eb', label: 'AVG', dash: true },
-          { color: '#16a34a', label: 'P50' },
-          { color: '#d97706', label: 'P95' },
-          { color: '#ea580c', label: 'P99' },
-        ]}/>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <ChartHeader title="Latency" legend={[
+            { color: '#2563eb', label: 'AVG', dash: true },
+            { color: '#16a34a', label: 'P50' },
+            { color: '#d97706', label: 'P95' },
+            { color: '#ea580c', label: 'P99' },
+          ]}/>
+          {/* 시간 범위 버튼 */}
+          <div style={{ display: 'flex', gap: 3, marginLeft: 'auto' }}>
+            <RangeBtn label="Live" active={range === null} onClick={handleLive} accent />
+            {RANGE_LABELS.map(({ key, label }) => (
+              <RangeBtn key={key} label={label} active={range === key} onClick={() => handleRange(key)} />
+            ))}
+          </div>
+        </div>
       </div>
       <div style={{ height: 140, padding: '0 14px 8px', flexShrink: 0 }}>
-        <LatencyChart history={history} isSpike={snap.is_spike}/>
+        <LatencyChart history={displayHistory} isSpike={snap.is_spike}/>
       </div>
 
     </div>
@@ -194,6 +259,19 @@ function ChartHeader({ title, legend }: { title: string; legend: { color: string
         ))}
       </div>
     </div>
+  )
+}
+
+function RangeBtn({ label, active, onClick, accent }: { label: string; active: boolean; onClick: () => void; accent?: boolean }) {
+  return (
+    <button onClick={onClick} style={{
+      fontSize: 9, padding: '2px 6px', borderRadius: 3, cursor: 'pointer', fontWeight: 600,
+      border: `1px solid ${active ? (accent ? '#6366f1' : '#64748b') : 'var(--border)'}`,
+      background: active ? (accent ? '#6366f1' : '#334155') : 'var(--bg-surface)',
+      color: active ? '#fff' : 'var(--text-muted)',
+    }}>
+      {label}
+    </button>
   )
 }
 
