@@ -18,9 +18,8 @@
 
 ## 프로젝트 개요
 
-MicroTrace는 MSA 환경에서 latency spike의 원인을 자동으로 좁혀주는 eBPF 기반 실시간 진단 도구다.
-네트워크 지표(RTT, 재전송)와 서버 리소스 지표(CPU throttling, IO wait, memory pressure)를 같은 시간축에서 수집해서
-"네트워크 문제인가, 서버 리소스 문제인가"를 빠르게 판별하는 것이 핵심 목표다.
+MicroTrace는 latency spike가 왜 났는지 — 네트워크인지, CPU throttle인지, 메모리인지 — 가장 빠르게 좁혀주는 eBPF 기반 root-cause 진단 도구다.
+주인공은 latency다. 서버 리소스(CPU throttle, OOM, memory pressure)는 cause 판별을 위한 증거로만 수집한다. Datadog식 전수 수집이 아니다.
 
 기획 문서: `mdfiles/microtrace.md`, `mdfiles/integration.md`, `mdfiles/netsim.md`
 

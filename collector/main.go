@@ -28,12 +28,14 @@ import (
 	"microtrace/collector/resolver"
 	"microtrace/collector/resource"
 	"microtrace/collector/stats"
+	"microtrace/collector/store"
 )
 
 const (
-	agentBinary        = "../agent/tcp_trace"
+	agentBinary         = "../agent/tcp_trace"
 	resourceAgentBinary = "../resource_agent/resource_agent"
-	listenAddr         = ":9090"
+	listenAddr          = ":9090"
+	dbPath              = "microtrace.db"
 )
 
 func main() {
@@ -60,16 +62,34 @@ func main() {
 		svcResolver = resolver.NewEnrichResolver(dockerResolver)
 	}
 
-	// ── 4. Processor 시작 ──────────────────────────────────────────────
+	// ── 4. Store 시작 ──────────────────────────────────────────────────
+	// SQLite 초기화 실패 시 경고만 내고 저장 없이 계속 진행한다.
+	var storeFn stats.StoreFn
+	db, err := store.New(dbPath)
+	if err != nil {
+		log.Printf("[main] SQLite 초기화 실패 (저장 비활성화): %v", err)
+	} else {
+		defer db.Close()
+		done := make(chan struct{})
+		go db.Run(done)
+		defer close(done)
+		storeFn = stats.StoreFn{
+			Conn:     db.WriteConn,
+			Resource: db.WriteResource,
+		}
+		log.Printf("[main] SQLite 저장 활성화: %s", dbPath)
+	}
+
+	// ── 5. Processor 시작 ──────────────────────────────────────────────
 	// hub.Broadcast를 함수 포인터로 넘긴다.
-	// stats 패키지가 hub 패키지를 직접 임포트하지 않아도 된다.
+	// stats 패키지가 hub/store 패키지를 직접 임포트하지 않아도 된다.
 	proc := stats.New(svcResolver, func(msg model.OutboundMsg) {
 		h.Broadcast(msg)
-	})
+	}, storeFn)
 
 	h.SetHistoryFn(proc.GetHistory)
 
-	// ── 5. Agent Reader 시작 ───────────────────────────────────────────
+	// ── 6. Agent Reader 시작 ───────────────────────────────────────────
 	var agentProvider agent.EventProvider = agent.NewSubprocessProvider(agentBinary)
 	eventCh, err := agentProvider.Start(ctx)
 	if err != nil {
@@ -77,7 +97,7 @@ func main() {
 	}
 	go proc.Run(eventCh)
 
-	// ── 5b. Resource Agent 시작 ────────────────────────────────────────
+	// ── 6b. Resource Agent 시작 ────────────────────────────────────────
 	// resource_agent 바이너리가 없으면 경고만 내고 계속 진행한다.
 	// 자원 수집 없이도 latency 추적은 정상 동작해야 한다.
 	var resProvider resource.ResourceProvider = resource.NewSubprocessProvider(resourceAgentBinary)
@@ -87,7 +107,7 @@ func main() {
 		proc.ForwardResource(resCh)
 	}
 
-	// ── 6. HTTP 서버 ───────────────────────────────────────────────────
+	// ── 7. HTTP 서버 ───────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.ServeWs)
 	mux.HandleFunc("/", serveHome)
@@ -102,7 +122,7 @@ func main() {
 		}
 	}()
 
-	// ── 7. 종료 대기 ───────────────────────────────────────────────────
+	// ── 8. 종료 대기 ───────────────────────────────────────────────────
 	<-ctx.Done()
 	log.Println("[main] 종료 신호 수신, graceful shutdown 시작")
 	srv.Shutdown(context.Background())
