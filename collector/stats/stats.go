@@ -229,9 +229,10 @@ type Processor struct {
 	resolver  resolver.ServiceResolver
 	broadcast BroadcastFn
 
-	mu    sync.Mutex
-	conns map[ConnKey]*connStats
-	flows map[FlowKey]*flowState
+	mu        sync.Mutex
+	conns     map[ConnKey]*connStats
+	flows     map[FlowKey]*flowState
+	resources map[string]*model.ResourceSnapshot // 서비스명 → 최신 리소스 스냅샷
 }
 
 // New — Processor를 생성한다.
@@ -244,6 +245,7 @@ func New(r resolver.ServiceResolver, fn BroadcastFn) *Processor {
 		broadcast: fn,
 		conns:     make(map[ConnKey]*connStats),
 		flows:     make(map[FlowKey]*flowState),
+		resources: make(map[string]*model.ResourceSnapshot),
 	}
 }
 
@@ -367,6 +369,20 @@ func (p *Processor) publishSnapshots() {
 			SpikeThresholdUs: threshold,
 		}
 
+		// spike 발생 시에만 cause_kind 판별 — spike 아닐 때는 빈 문자열 유지
+		if spike {
+			dstRes := p.resources[key.Dst]
+			kind, signal := detectCause(cs.dstType, dstRes)
+			snap.CauseKind = kind
+			snap.CauseSignal = signal
+			if dstRes != nil {
+				snap.DstCPUPct = dstRes.CPUPct
+				snap.DstCPUThrottlePct = dstRes.CPUThrottlePct
+				snap.DstMemPressurePct = dstRes.MemPressurePct
+				snap.DstIOWaitPct = dstRes.IOWaitPct
+			}
+		}
+
 		// 히스토리 포인트 저장 — 같은 lock 안에서 처리
 		pt := model.HistoryPoint{
 			Time:         now.UnixMilli(),
@@ -483,6 +499,39 @@ func (p *Processor) sweepExpired() {
 	}
 }
 
+// detectCause — spike 발생 시 dst 서비스의 리소스 상태를 보고 원인 후보를 판별한다.
+//
+// 판별 우선순위 (신호 품질 순):
+//  1. external dst  — 리소스와 무관, 외부 의존성 문제
+//  2. oom_kill > 0  — 프로세스 강제 종료, 결정적 증거
+//  3. throttle > 25% — CFS 스케줄러가 컨테이너를 실제로 멈춤 (직접 원인)
+//  4. throttle > 1% AND cpu > 60% — 버스트 패턴으로 throttle 발생
+//  5. mem_pressure > 20% — memory.events.high 기반 stall 신호
+//  6. 위 조건 없음 — TCP 레이어 문제(기본값)
+//
+// io_wait_pct는 호스트 전체 기준이라 컨테이너 원인 판단에 사용하지 않는다.
+func detectCause(dstType string, res *model.ResourceSnapshot) (kind, signal string) {
+	if dstType == "external" {
+		return "external", "external_dst"
+	}
+	if res == nil {
+		return "network", "none"
+	}
+	if res.OOMKillCount > 0 {
+		return "memory", "oom_kill"
+	}
+	if res.CPUThrottlePct > 25 {
+		return "cpu", "cpu_throttle_high"
+	}
+	if res.CPUThrottlePct > 1 && res.CPUPct > 60 {
+		return "cpu", "cpu_throttle_burst"
+	}
+	if res.MemPressurePct > 20 {
+		return "memory", "mem_pressure"
+	}
+	return "network", "none"
+}
+
 // ForwardResource — resource_agent 스냅샷을 받아 hub로 브로드캐스트한다.
 //
 // main.go에서 직접 Broadcast를 호출하지 않고 Processor에 위임함으로써
@@ -492,8 +541,14 @@ func (p *Processor) ForwardResource(resCh <-chan model.ResourceSnapshot) {
 	go func() {
 		for snap := range resCh {
 			s := snap
-			log.Printf("[resource] %s cpu=%.2f%% mem=%dKB io_wait=%.2f%%",
-				s.ServiceName, s.CPUPct, s.MemCurrentBytes/1024, s.IOWaitPct)
+			log.Printf("[resource] %s cpu=%.2f%% throttle=%.2f%% mem=%dKB io_wait=%.2f%%",
+				s.ServiceName, s.CPUPct, s.CPUThrottlePct, s.MemCurrentBytes/1024, s.IOWaitPct)
+
+			// 최신 리소스 상태를 맵에 보관 — publishSnapshots()에서 cause_kind 판별에 사용
+			p.mu.Lock()
+			p.resources[s.ServiceName] = &s
+			p.mu.Unlock()
+
 			p.broadcast(model.OutboundMsg{MsgType: "resource", Resource: &s})
 		}
 		log.Println("[stats] resource_agent 스트림 종료")

@@ -18,8 +18,9 @@ Study/
 │   ├── microservices.md
 │   └── Netsim.md
 ├── infra/
-│   ├── linux.md       ← cgroup v2, /proc/stat, /sys/fs/cgroup
-│   └── docker.md
+│   ├── linux.md          ← cgroup v2, /proc/stat, /sys/fs/cgroup
+│   ├── docker.md
+│   └── cause_detection.md ← CPU throttle, PSI, memory.events, io_wait 신호 품질 비교
 ├── project/
 │   └── flow.md        ← 빌드/실행/데이터 흐름 (상세)
 └── Errors/            ← 날짜별 트러블슈팅
@@ -95,10 +96,10 @@ WebSocket 메시지 타입: `stats` / `event` / `resource` / `remove` / `history
 
 ---
 
-## 현재 상태 (2026-05-15 기준)
+## 현재 상태 (2026-05-18 기준)
 
-- **완료:** 전체 수집 파이프라인 (latency + resource), 대시보드 UI, EXT 배지 분류, 백엔드 리팩토링
-- **다음:** `cause_kind` 자동 판별 — spike 발생 시 CPU/IO/Memory/Network 중 원인 후보 자동 분류
+- **완료:** 전체 수집 파이프라인 (latency + resource), 대시보드 UI, EXT 배지 분류, 백엔드 리팩토링, 차트 pan/zoom
+- **진행 중:** `cause_kind` 자동 판별 (Issue #3) — spike 발생 시 CPU throttle/Memory pressure/Network 중 원인 후보 자동 분류
 - 상세: `mdfiles/todo.md`
 
 ---

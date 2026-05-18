@@ -55,8 +55,7 @@ export function useChartPanZoom({ totalLength, defaultVisible = DEFAULT_VISIBLE 
 
     const onMove = (me: MouseEvent) => {
       if (!dragRef.current) return
-      const canvas = e.currentTarget as HTMLCanvasElement
-      const pw = canvas.clientWidth  // 픽셀 너비 (CSS)
+      const pw = rect.width  // rect는 mousedown 시점에 캡처됨 (e.currentTarget은 이후 null)
       const { startX, startWindow } = dragRef.current
       const dx = me.clientX - rect.left - startX
 

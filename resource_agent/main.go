@@ -43,6 +43,12 @@ type ResourceSnapshot struct {
 	IOWriteBytesPerS uint64  `json:"io_write_bytes_per_s"`
 	IOWaitPct        float64 `json:"io_wait_pct"`
 	OOMKillCount     uint64  `json:"oom_kill_count"`
+
+	// PSI (Pressure Stall Information) — memory.pressure 파일에서 읽음.
+	// some: 최소 1개 태스크가 메모리 때문에 멈춘 시간 비율 (avg10, 최근 10초 평균)
+	// full: 모든 태스크가 동시에 멈춘 시간 비율 (avg10)
+	PSIMemSomePct float64 `json:"psi_mem_some_pct"`
+	PSIMemFullPct float64 `json:"psi_mem_full_pct"`
 }
 
 // cpuPrev — CPU delta 계산을 위한 이전 tick 상태
@@ -247,6 +253,12 @@ func readSnapshot(name, cgroupPath string, st *containerState, nowMs int64, inte
 		ioWaitPct = 0
 	}
 
+	// ── PSI memory.pressure ───────────────────────────────────────────────
+	// some avg10: 최근 10초 중 최소 1개 태스크가 메모리 때문에 stall된 시간 비율
+	// full avg10: 최근 10초 중 모든 태스크가 동시에 stall된 시간 비율
+	// 파일이 없는 커널(< 4.20)이나 설정에 따라 없을 수 있으므로 선택적으로 처리
+	psiSome, psiFull := readPSIMemory(cgroupPath)
+
 	if !st.hasPrev {
 		// 첫 tick: 기준값 저장만 하고 반환하지 않음
 		st.cpuPrev = cpuCur
@@ -295,6 +307,8 @@ func readSnapshot(name, cgroupPath string, st *containerState, nowMs int64, inte
 		IOWriteBytesPerS: ioWritePerS,
 		IOWaitPct:        ioWaitPct,
 		OOMKillCount:     deltaOOM,
+		PSIMemSomePct:    psiSome,
+		PSIMemFullPct:    psiFull,
 	}, nil
 }
 
@@ -478,6 +492,53 @@ func clamp100(v float64) float64 {
 		return 100
 	}
 	return v
+}
+
+// readPSIMemory — cgroup의 memory.pressure 파일을 읽어 some/full avg10 값을 반환한다.
+//
+// 파일 형식:
+//
+//	some avg10=0.12 avg60=0.03 avg300=0.01 total=123456
+//	full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+//
+// avg10: 최근 10초 평균. 실시간 판단에 가장 적합한 윈도우.
+// 파일이 없거나(커널 < 4.20, PSI 비활성화) 파싱 실패 시 (0, 0)을 반환한다.
+func readPSIMemory(cgroupPath string) (some, full float64) {
+	f, err := os.Open(cgroupPath + "/memory.pressure")
+	if err != nil {
+		return 0, 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		// fields[0] = "some" 또는 "full", 이후는 "key=value" 쌍
+		if len(fields) < 2 {
+			continue
+		}
+		var target *float64
+		switch fields[0] {
+		case "some":
+			target = &some
+		case "full":
+			target = &full
+		default:
+			continue
+		}
+		for _, kv := range fields[1:] {
+			if !strings.HasPrefix(kv, "avg10=") {
+				continue
+			}
+			val, err := strconv.ParseFloat(strings.TrimPrefix(kv, "avg10="), 64)
+			if err == nil {
+				*target = clamp100(val)
+			}
+			break
+		}
+	}
+	return some, full
 }
 
 // memPressureScore — memory.events의 high 이벤트 횟수를 0-100 점수로 변환한다.

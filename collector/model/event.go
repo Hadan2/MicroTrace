@@ -85,6 +85,10 @@ type ResourceSnapshot struct {
 	IOWriteBytesPerS uint64  `json:"io_write_bytes_per_s"`// 초당 쓰기 바이트
 	IOWaitPct        float64 `json:"io_wait_pct"`         // IO wait 비율 (0-100, /proc/stat 기반)
 	OOMKillCount     uint64  `json:"oom_kill_count"`      // oom_kill 누적 횟수 (delta)
+
+	// PSI (Pressure Stall Information) — cgroup memory.pressure, avg10 (최근 10초 평균)
+	PSIMemSomePct float64 `json:"psi_mem_some_pct"` // 최소 1개 태스크 stall 비율
+	PSIMemFullPct float64 `json:"psi_mem_full_pct"` // 모든 태스크 동시 stall 비율
 }
 
 // StatSnapshot — 1초마다 stats 패키지가 생성하는 집계 결과
@@ -105,4 +109,18 @@ type StatSnapshot struct {
 	SampleCount      int    `json:"sample_count"`       // 이번 1초 구간 RTT 샘플 수
 	IsSpike          bool   `json:"is_spike"`           // stableP99 기반 spike 여부
 	SpikeThresholdUs uint64 `json:"spike_threshold_us"` // 현재 임계값 (stableP99 × 3)
+
+	// cause_kind: spike 발생 시 원인 후보. spike 아니면 빈 문자열.
+	// "cpu" | "memory" | "network" | "external"
+	CauseKind string `json:"cause_kind,omitempty"`
+
+	// cause_signal: 판별에 사용된 신호. 왜 이 cause_kind가 됐는지 근거.
+	// "cpu_throttle_high" | "cpu_throttle_burst" | "oom_kill" | "mem_pressure" | "external_dst" | "none"
+	CauseSignal string `json:"cause_signal,omitempty"`
+
+	// dst 서비스의 리소스 현황 (spike 발생 시점 스냅샷). 프론트 Evidence Chip 표시용.
+	DstCPUPct        float64 `json:"dst_cpu_pct,omitempty"`
+	DstCPUThrottlePct float64 `json:"dst_cpu_throttle_pct,omitempty"`
+	DstMemPressurePct float64 `json:"dst_mem_pressure_pct,omitempty"`
+	DstIOWaitPct     float64 `json:"dst_io_wait_pct,omitempty"`
 }
