@@ -15,12 +15,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"microtrace/collector/agent"
 	"microtrace/collector/hub"
@@ -110,6 +112,7 @@ func main() {
 	// ── 7. HTTP 서버 ───────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.ServeWs)
+	mux.HandleFunc("/api/history", makeHistoryHandler(db))
 	mux.HandleFunc("/", serveHome)
 
 	srv := &http.Server{Addr: listenAddr, Handler: mux}
@@ -127,6 +130,52 @@ func main() {
 	log.Println("[main] 종료 신호 수신, graceful shutdown 시작")
 	srv.Shutdown(context.Background())
 	log.Println("[main] 종료 완료")
+}
+
+// makeHistoryHandler — GET /api/history?src=&dst=&range=1h|6h|24h|7d
+//
+// db가 nil이면 (SQLite 초기화 실패) 빈 배열을 반환한다.
+func makeHistoryHandler(db *store.Store) http.HandlerFunc {
+	rangeMap := map[string]time.Duration{
+		"1h":  1 * time.Hour,
+		"6h":  6 * time.Hour,
+		"24h": 24 * time.Hour,
+		"7d":  7 * 24 * time.Hour,
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		if db == nil {
+			w.Write([]byte("[]"))
+			return
+		}
+
+		src := r.URL.Query().Get("src")
+		dst := r.URL.Query().Get("dst")
+		rangeStr := r.URL.Query().Get("range")
+		if src == "" || dst == "" {
+			http.Error(w, `{"error":"src and dst required"}`, http.StatusBadRequest)
+			return
+		}
+
+		dur, ok := rangeMap[rangeStr]
+		if !ok {
+			dur = time.Hour // 기본값 1h
+		}
+
+		rows, err := db.QueryHistory(src, dst, time.Now().Add(-dur))
+		if err != nil {
+			log.Printf("[api] history 조회 실패: %v", err)
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		if rows == nil {
+			rows = []store.HistoryRow{}
+		}
+		json.NewEncoder(w).Encode(rows)
+	}
 }
 
 // serveHome — 브라우저 테스트용 HTML 페이지 (Wails 대시보드 완성 전까지 사용)
