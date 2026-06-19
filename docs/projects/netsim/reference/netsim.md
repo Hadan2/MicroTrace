@@ -1,5 +1,7 @@
 # 🚀 NetSim Lab — Developer-Centric Network Simulation Platform
 
+> 역할: **레퍼런스(사람용 기획서 전문)**. AI는 보통 축약본 [`../guide/overview.md`](../guide/overview.md)만 읽으면 된다. 이 문서는 전체 맥락·마일스톤이 필요할 때 참조한다.
+
 > **"네트워크 문제는 '추측'이 아니라 '재현(Replication)'으로 해결한다."**
 > 무거운 엔터프라이즈 도구 대신, 로컬 환경에서 클릭 몇 번으로 복잡한 네트워크 장애를 주입하고 관측하는 **가벼운(Lightweight) Chaos Engineering 도구**
 

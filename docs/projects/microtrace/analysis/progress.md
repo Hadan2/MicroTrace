@@ -1,30 +1,31 @@
 # MicroTrace 진행 기록
 
-> 구현 진행 상황 요약. 상세 개념은 `Study/` 폴더 참고.
+> 구현 진행 상황 요약(이 프로젝트 **진행 현황의 단일 출처**). 상세 개념은 `docs/learning/` 폴더, 코드 위치·빌드는 `docs/projects/microtrace/code/microtrace.code.md` 참고.
 
 ---
 
-## Study 폴더 구조
+## 관련 문서 구조
 
 ```
-Study/
-├── kernel/
-│   ├── ebpf.md        ← kprobe, sock_ops, Ring Buffer, Verifier, CO-RE, skeleton
-│   ├── c_language.md
-│   └── go.md          ← goroutine, channel, select, sync, context, HTTP
-├── network/
-│   ├── tcp.md         ← RTT, 재전송, Keep-Alive, EWMA, jitter(mdev)
-│   ├── websocket.md   ← WebSocket 프로토콜, Hub 패턴, 브로드캐스트
-│   ├── microservices.md
-│   └── Netsim.md
-├── infra/
-│   ├── linux.md          ← cgroup v2, /proc/stat, /sys/fs/cgroup
-│   ├── docker.md
-│   ├── cause_detection.md ← CPU throttle, PSI, memory.events, io_wait 신호 품질 비교
-│   └── sqlite.md         ← SQLite 기초, WAL 모드, 배치 INSERT, TTL, 인덱스
-├── project/
-│   └── flow.md        ← 빌드/실행/데이터 흐름 (상세)
-└── Errors/            ← 날짜별 트러블슈팅
+docs/
+├── learning/
+│   ├── kernel/
+│   │   ├── ebpf.md        ← kprobe, sock_ops, Ring Buffer, Verifier, CO-RE, skeleton
+│   │   ├── c_language.md
+│   │   └── go.md          ← goroutine, channel, select, sync, context, HTTP
+│   ├── network/
+│   │   ├── tcp.md         ← RTT, 재전송, Keep-Alive, EWMA, jitter(mdev)
+│   │   ├── websocket.md   ← WebSocket 프로토콜, Hub 패턴, 브로드캐스트
+│   │   ├── microservices.md
+│   │   └── percentile.md
+│   └── infra/
+│       ├── linux.md          ← cgroup v2, /proc/stat, /sys/fs/cgroup
+│       ├── docker.md
+│       ├── cause_detection.md ← CPU throttle, PSI, memory.events, io_wait 신호 품질 비교
+│       └── sqlite.md         ← SQLite 기초, WAL 모드, 배치 INSERT, TTL, 인덱스
+├── projects/microtrace/code/
+│   └── microtrace.code.md ← 코드맵(기능→파일/심볼) + 부록A 빌드·로드 순서
+└── reports/              ← 날짜별 트러블슈팅 (yyyy-mm-dd.md)
 ```
 
 ---
@@ -101,7 +102,7 @@ WebSocket 메시지 타입: `stats` / `event` / `resource` / `remove` / `history
 
 - **완료:** 전체 수집 파이프라인 (latency + resource), 대시보드 UI, cause_kind 자동 판별, 차트 pan/zoom
 - **다음:** SQLite 영속성 + EC2 검증 (Phase 4)
-- 상세: `mdfiles/todo.md`
+- 상세: `docs/ai/todo.md`
 
 ---
 

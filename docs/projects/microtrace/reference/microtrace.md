@@ -1,5 +1,7 @@
 # 🔬 MicroTrace — eBPF-based Latency Root-Cause Profiler
 
+> 역할: **레퍼런스(사람용 PRD 전문)**. 상세 기획서 원본이다. AI는 보통 축약본 [`../guide/overview.md`](../guide/overview.md)만 읽으면 되고, 코드는 [`../code/microtrace.code.md`](../code/microtrace.code.md)를 본다. 이 문서는 배경·근거·전체 맥락이 필요할 때 참조한다.
+
 > **"latency spike가 왜 났는지 — 네트워크인지 CPU인지 메모리인지 — 가장 빠르게 좁혀주는 eBPF 기반 root-cause 진단 도구"**
 
 ---
@@ -208,6 +210,8 @@ eBPF를 사용하는 더 큰 이유:
 ---
 
 ## 10. 개발 마일스톤 (Milestones)
+
+> ⚠️ 아래는 **계획 시점 기준 마일스톤·이력**이다. **실시간 진행 현황의 단일 출처는 [`../analysis/progress.md`](../analysis/progress.md)** — 완료 여부가 헷갈리면 그쪽을 본다.
 
 ### ✅ Phase 1 — Agent 뼈대 구축 (완료)
 
@@ -503,4 +507,4 @@ Phase 2 (EC2):  agent → gRPC → 중앙 Collector  (이 시점에 전환)
 - Kubernetes integration (Pod/Service 단위 추적)
 - UDP 패킷 드롭 분석 지원
 - cloud deployment (SaaS 형태)
-- NetSim Lab 통합 (→ [integration.md](./integration.md) 참조)
+- NetSim Lab 통합 (→ [integration.md](../../netsim/reference/integration.md) 참조)

@@ -1,8 +1,9 @@
 # MicroTrace 프로젝트 가이드
 
-> AI가 이 프로젝트에서 작업할 때 따라야 할 모든 규칙이 여기에 있다.
-> 루트의 `AGENTS.md`는 이 파일(mdfiles/CLAUDE.md)의 심볼릭 링크다.
-> **두 파일을 따로 수정하지 말 것. 항상 이 파일만 수정한다.**
+> AI가 이 프로젝트에서 작업할 때 따라야 할 모든 규칙이 여기에 있다. 이 파일이 원본이다.
+> 루트 `CLAUDE.md`는 `@docs/ai/CLAUDE.md`로 이 파일을 import하고(Claude 자동 로딩용),
+> 루트 `AGENTS.md`는 이 파일을 가리키는 심볼릭 링크다.
+> **다른 두 파일을 따로 수정하지 말 것. 항상 이 파일만 수정한다.**
 
 ---
 
@@ -21,7 +22,35 @@
 MicroTrace는 latency spike가 왜 났는지 — 네트워크인지, CPU throttle인지, 메모리인지 — 가장 빠르게 좁혀주는 eBPF 기반 root-cause 진단 도구다.
 주인공은 latency다. 서버 리소스(CPU throttle, OOM, memory pressure)는 cause 판별을 위한 증거로만 수집한다. Datadog식 전수 수집이 아니다.
 
-기획 문서: `mdfiles/microtrace.md`, `mdfiles/integration.md`, `mdfiles/netsim.md`
+AI용 축약 개요: `docs/projects/microtrace/guide/overview.md` (NetSim: `docs/projects/netsim/guide/overview.md`)
+사람용 기획서 전문: `docs/projects/microtrace/reference/microtrace.md`, `docs/projects/netsim/reference/{netsim,integration}.md`
+
+---
+
+## 작업 워크플로우 (★ 매 작업 이 순서를 따른다)
+
+기능 추가·수정·리팩토링 검토 요청을 받으면 **문서를 따라 필요한 코드만** 읽는다. 전체 코드를 통독하지 않는다.
+
+```
+1. 진입   guide/overview.md          프로젝트 전체 파악 (라우터)
+2. 조준   code/microtrace.code.md     해당 기능 §섹션 → 파일/심볼 확인
+            └ §11 함정·교차영향 + §1 필드 전파 지도를 반드시 확인
+3. 진입   실제 코드                   코드맵이 가리킨 파일/심볼만 (전체 X)
+4. 막히면  learning/<분야>/ (개념) · reference/microtrace.md (배경·근거)
+```
+
+**작업 중/후 문서 갱신 규칙 (안 썩게 하는 핵심):**
+
+| 무엇이 바뀌면 | 갱신할 문서 |
+|---|---|
+| 코드 구조/심볼/교차영향 | `code/microtrace.code.md` |
+| 진행 단계(Phase·기능 완료) | `analysis/progress.md` (현황 단일 출처) |
+| "지금 하는 작업" 전환 | `ai/todo.md` |
+| 새 개념 학습 | `learning/<분야>/` |
+| 에러 트러블슈팅 | `reports/yyyy-mm-dd.md` |
+| 설계 방향/포지션 변경 | `guide/overview.md` (+ 필요 시 reference) |
+
+> 문서 역할: **guide=AI 축약 자연어 / code=코드맵(파일·심볼) / reference=사람용 전문 / learning=개념 / analysis=진행 / reports=트러블슈팅.** 전체 지도는 `docs/README.md`.
 
 ---
 
@@ -156,13 +185,17 @@ make dev
 
 ## 문서 구조
 
+전체 지도는 `docs/README.md`에 있다. 역할별로 분리돼 있으니 필요한 한 덩이만 읽는다.
+
 | 파일 | 역할 |
 |---|---|
-| `mdfiles/CLAUDE.md` (이 파일) | AI 작업 가이드 원본. `AGENTS.md`는 이 파일의 심볼릭 링크 |
-| `mdfiles/todo.md` | 다음 작업 기록 |
-| `mdfiles/microtrace.md` | 전체 기획서 |
-| `Study/STUDY.md` | 구현 진행 기록 (요약) |
-| `Study/project/flow.md` | 빌드/실행/데이터 흐름 상세 |
+| `docs/README.md` | 문서 지도 (역할 구분 + 빠른 진입) |
+| `docs/ai/CLAUDE.md` (이 파일) | AI 작업 가이드 원본. 루트 `CLAUDE.md`/`AGENTS.md`가 이 파일을 가리킴 |
+| `docs/ai/todo.md` | 다음 작업 기록 |
+| `docs/projects/microtrace/guide/overview.md` | AI용 축약 개요 (목적·포지션·동작원리) |
+| `docs/projects/microtrace/reference/microtrace.md` | 사람용 PRD 전문 (배경·근거 필요 시) |
+| `docs/projects/microtrace/code/microtrace.code.md` | ★코드 수정·탐색 시 필수. 기능→파일/심볼, 필드 전파 지도, 함정·교차영향, 부록A 빌드·로드 순서 |
+| `docs/projects/microtrace/analysis/progress.md` | 구현 진행 기록 (요약) |
 
 ---
 
@@ -207,18 +240,23 @@ git checkout -b feat/#12-cause-kind
 
 ---
 
-## Study 폴더 관리 규칙
+## 학습 노트 / 리포트 관리 규칙
 
-새로운 개념이 등장할 때마다 아래 파일에 추가한다.
+새로운 개념이 등장할 때마다 `docs/learning/<분야>/`에 추가한다.
 
 | 파일 | 다루는 내용 |
 |---|---|
-| `Study/kernel/ebpf.md` | eBPF, kprobe, tracepoint, Ring Buffer, Verifier, CO-RE, sock_ops |
-| `Study/kernel/c_language.md` | C 언어 문법, 포인터, 구조체 |
-| `Study/kernel/go.md` | Go 문법, goroutine, channel, sync |
-| `Study/network/tcp.md` | TCP 흐름, RTT, 재전송, Keep-Alive, EWMA |
-| `Study/network/websocket.md` | WebSocket 프로토콜, Hub 패턴 |
-| `Study/infra/linux.md` | Linux 명령어, cgroup v2, /proc |
-| `Study/infra/docker.md` | Docker, 컨테이너, Docker API |
-| `Study/project/flow.md` | MicroTrace 전체 빌드/실행/데이터 흐름 |
-| `Study/Errors/` | 날짜별 트러블슈팅 (03.13_errors.md 형식) |
+| `docs/learning/kernel/ebpf.md` | eBPF, kprobe, tracepoint, Ring Buffer, Verifier, CO-RE, sock_ops |
+| `docs/learning/kernel/c_language.md` | C 언어 문법, 포인터, 구조체 |
+| `docs/learning/kernel/go.md` | Go 문법, goroutine, channel, sync |
+| `docs/learning/network/tcp.md` | TCP 흐름, RTT, 재전송, Keep-Alive, EWMA |
+| `docs/learning/network/websocket.md` | WebSocket 프로토콜, Hub 패턴 |
+| `docs/learning/network/microservices.md` | MSA 개념, 서비스 간 통신 |
+| `docs/learning/network/percentile.md` | p50/p95/p99 백분위 통계 |
+| `docs/learning/infra/linux.md` | Linux 명령어, cgroup v2, /proc |
+| `docs/learning/infra/docker.md` | Docker, 컨테이너, Docker API |
+| `docs/learning/infra/sqlite.md` | SQLite 영속성, 배치 INSERT, TTL |
+| `docs/learning/infra/cause_detection.md` | cause_kind 자동 판별 규칙 |
+
+빌드/실행/데이터 흐름·코드 위치는 코드맵인 `docs/projects/microtrace/code/microtrace.code.md`에 둔다.
+에러 트러블슈팅은 `docs/reports/yyyy-mm-dd.md` 형식으로 날짜별로 기록한다.

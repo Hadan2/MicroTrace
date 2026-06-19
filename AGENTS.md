@@ -1,1 +1,1 @@
-mdfiles/CLAUDE.md
+docs/ai/CLAUDE.md

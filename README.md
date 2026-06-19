@@ -39,13 +39,19 @@
 
 ## 문서 구조
 
+전체 지도는 **[docs/README.md](./docs/README.md)** 참고 (문서는 역할별로 분리됨).
+
 | 문서 | 내용 |
 |---|---|
-| [microtrace.md](./mdfiles/microtrace.md) | MicroTrace 상세 기획서 |
-| [netsim.md](./mdfiles/netsim.md) | NetSim Lab 상세 기획서 |
-| [integration.md](./mdfiles/integration.md) | 통합/독립 운영 시나리오 |
-| [todo.md](./mdfiles/todo.md) | 다음 작업 및 완료 이력 |
-| [interview-qa.md](./mdfiles/interview-qa.md) | 면접 대비 Q&A |
+| [docs/README.md](./docs/README.md) | 문서 지도 (역할 구분 + 빠른 진입) |
+| [overview.md](./docs/projects/microtrace/guide/overview.md) | MicroTrace 개요 (AI용 축약) |
+| [microtrace.md](./docs/projects/microtrace/reference/microtrace.md) | MicroTrace 상세 기획서 (사람용 전문) |
+| [netsim.md](./docs/projects/netsim/reference/netsim.md) | NetSim Lab 상세 기획서 |
+| [integration.md](./docs/projects/netsim/reference/integration.md) | 통합/독립 운영 시나리오 |
+| [todo.md](./docs/ai/todo.md) | 다음 작업 및 완료 이력 |
+| [interview-qa.md](./docs/projects/microtrace/reference/interview-qa.md) | 면접 대비 Q&A |
+| [microtrace.code.md](./docs/projects/microtrace/code/microtrace.code.md) | 코드맵 (기능→파일/심볼) |
+| [progress.md](./docs/projects/microtrace/analysis/progress.md) | 구현 진행 기록 |
 
 ---
 

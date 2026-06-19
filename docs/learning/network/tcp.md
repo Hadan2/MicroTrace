@@ -139,7 +139,7 @@ MicroTrace kprobe 출력:
 ```
 
 → Phase 2에서 sock_ops로 전환하면 연결 위의 요청 단위 latency도 측정 가능.
-   자세한 내용은 `Study/kernel/ebpf.md` → sock_ops 섹션 참고.
+   자세한 내용은 `docs/learning/kernel/ebpf.md` → sock_ops 섹션 참고.
 
 ---
 
@@ -300,7 +300,7 @@ Keep-Alive로 요청이 많을수록 RTT_CB가 더 자주 발생
 
 > **참고:** 스파이크를 더 정확하게 잡으려면 평활화된 srtt 외에 `mdev_us`(RTT 변동폭)도 필요합니다.
 > srtt는 EWMA로 평활화되어 있어서 500ms 스파이크도 부드럽게 반영됩니다.
-> → 확장 지표 계획의 Jitter 섹션 참고 (`mdfiles/microtrace.md` → 12. 확장 지표 계획)
+> → 확장 지표 계획의 Jitter 섹션 참고 (`docs/projects/microtrace/reference/microtrace.md` → 12. 확장 지표 계획)
 
 ---
 

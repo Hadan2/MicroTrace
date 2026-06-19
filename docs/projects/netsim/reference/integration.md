@@ -1,5 +1,7 @@
 # 🔗 NetSim Lab & MicroTrace 통합/독립 운영 시나리오
 
+> 역할: **레퍼런스(사람용 전문)**. NetSim·MicroTrace 통합 시나리오 상세. AI용 축약은 [`../guide/overview.md`](../guide/overview.md)의 "MicroTrace 통합" 절.
+
 ---
 
 ## 1. NetSim 단독 운영 모드 (Standalone Mode)
