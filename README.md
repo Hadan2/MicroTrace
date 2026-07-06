@@ -49,7 +49,7 @@
 | [netsim.md](./docs/projects/netsim/reference/netsim.md) | NetSim Lab 상세 기획서 |
 | [integration.md](./docs/projects/netsim/reference/integration.md) | 통합/독립 운영 시나리오 |
 | [todo.md](./docs/ai/todo.md) | 다음 작업 및 완료 이력 |
-| [interview-qa.md](./docs/projects/microtrace/reference/interview-qa.md) | 면접 대비 Q&A |
+| [interview-qa.md](./docs/projects/microtrace/reference/interview-qa.md) | Q&A |
 | [microtrace.code.md](./docs/projects/microtrace/code/microtrace.code.md) | 코드맵 (기능→파일/심볼) |
 | [progress.md](./docs/projects/microtrace/analysis/progress.md) | 구현 진행 기록 |
 
