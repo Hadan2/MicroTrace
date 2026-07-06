@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": []
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/check-docs-sync.sh",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/suggest-commit.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

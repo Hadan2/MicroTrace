@@ -237,9 +237,35 @@ UI 컴포넌트(전부 `frontend/src/components/`, props는 `App.tsx` 참조):
 
 ---
 
+## 13. 코드 → 문서 역방향 매핑 (문서화 시 이 표를 본다)
+
+> 코드를 고친 뒤 **어떤 문서를 갱신해야 하는가**. (정방향 "상황→읽을 문서"는 `.claude/CLAUDE.md`.)
+> 규칙: 코드 변경이 **동작/구조/규약을 바꿨으면** 갱신, 오타·리네임·포맷팅만이면 생략 가능.
+> 연관 엣지/소유권/식별키를 건드렸으면 [`microtrace.edges.md`](microtrace.edges.md)도 함께 갱신한다.
+> 절차는 `/update-docs` 스킬(`.claude/skills/update-docs/SKILL.md`).
+
+| 수정한 코드(경로/심볼) | 갱신할 문서 |
+|---|---|
+| `agent/*`(eBPF 이벤트/수집) | 이 파일 §3 + (필드면) §1 + `edges.md` A·B |
+| `collector/stats/stats.go`(집계·spike·cause) | 이 파일 §4·§5 + `edges.md` A·C + (개념) `learning/infra/cause_detection.md` |
+| `collector/resource/*`, `resource_agent/*` | 이 파일 §6 + (필드면) §1 + `edges.md` C(이름 키) |
+| `collector/resolver/*` | 이 파일 §7 + `edges.md` B(IsInternal→cause) |
+| `collector/store/*`, `main.go` history 핸들러 | 이 파일 §8 |
+| `collector/hub/*` | 이 파일 §9 |
+| `frontend/*` | 이 파일 §10 + (타입 불일치면) §11 / `edges.md` C |
+| 공유 타입 필드 추가(`model/event.go` 등) | 이 파일 §1 필드 전파 지도 + `edges.md` B |
+| 함정/교차영향 새로 발견 | 이 파일 §11 + `edges.md` C |
+| 인터페이스 확장 지점 변경 | 이 파일 §12 + `coding-rules.md` |
+| 진행 단계(Phase·기능 완료) | `../analysis/progress.md` |
+
+> 표에 대응 행이 없는 **신규 기능**이면: `guide/`에 개념 문서 신설 + 이 파일에 새 §추가 +
+> 이 표에 행 추가 + `.claude/CLAUDE.md` 정방향 표에도 행 추가.
+
+---
+
 ## 부록 A. 빌드 · eBPF 로드 순서
 
-평소엔 `make dev` 한 번으로 빌드+실행된다(상세는 `docs/ai/CLAUDE.md` "개발 실행"). 수동 빌드 순서:
+평소엔 `make dev` 한 번으로 빌드+실행된다(상세는 `scripts/dev.sh`). 수동 빌드 순서:
 
 ```bash
 clang -target bpf -O2 -c agent/tcp_trace.bpf.c -o agent/tcp_trace.bpf.o   # 1. eBPF 바이트코드

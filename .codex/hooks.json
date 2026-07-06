@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/check-docs-sync.sh",
+            "timeout": 15,
+            "statusMessage": "Checking docs sync"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/suggest-commit.sh",
+            "timeout": 15,
+            "statusMessage": "Checking commit guidance"
+          }
+        ]
+      }
+    ]
+  }
+}

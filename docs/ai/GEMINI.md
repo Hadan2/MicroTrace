@@ -1,1 +1,0 @@
-Gemini CLI 는 무조건 CLAUDE.md 를 먼저 읽을 것.`
