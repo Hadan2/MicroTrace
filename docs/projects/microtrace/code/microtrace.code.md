@@ -204,7 +204,9 @@ UI 컴포넌트(전부 `frontend/src/components/`, props는 `App.tsx` 참조):
 | `TopoGraph` | 토폴로지 그래프(노드=서비스, 엣지=연결). 레이아웃 상수 `constants/topology.ts` `NODE_POS` |
 | `ConnectionListView` / `HeatmapMatrixView` | 리스트·히트맵 뷰 |
 | `DetailPanel` | 선택 엣지/노드 상세 + `LatencyChart` + `ResourceChart` |
-| `LatencyChart` | p50/p95/p99 시계열 (uPlot). 휠 줌·드래그 팬 `panZoomPlugin`. ★경계는 `dataBounds`로 매번 data에서 읽어 range 전환에도 안 어긋남. Live: 사용자 줌 중이면 `setData(d,false)`로 스케일 유지(`PanZoomState.userZoomed`), 완전 줌아웃 시 자동 추적 재개 |
+| `LatencyChart` | p50/p95/p99 시계열 (uPlot). 줌/팬·축은 `chartShared.ts` 공유. Live: 줌 중이면 스케일 유지, 완전 줌아웃 시 자동 추적 재개 |
+| `ResourceChart` | CPU/IO/Mem pressure 시계열 (uPlot, y축 0~100% 고정 + 70% 위험 점선). LatencyChart와 **동일 룩앤필** — `chartShared.ts` 공유 |
+| `chartShared.ts` | ★두 차트 공유 uPlot 로직: `panZoomPlugin`(경계를 `dataBounds`로 매번 data에서 읽어 range 전환에도 안 어긋남), `PanZoomState`, `applyData`(줌 유지 setData), `timeAxisValues`/`axisBase`(공통 축) |
 | `SpikeLog` | spike 이벤트 로그. cause 메타 `constants/causes.ts` `CAUSE_META` |
 
 - mock 모드: `VITE_MOCK=true`면 `useMockData`로 대체(`App.tsx`). mock 서비스명(api-gateway 등)은 `constants/topology.ts`에 있음.

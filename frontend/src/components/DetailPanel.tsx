@@ -236,7 +236,7 @@ export default function DetailPanel({ snap, history, selectedNode, nodeService, 
           </div>
         </div>
       </div>
-      <div style={{ height: 140, padding: '0 14px', flexShrink: 0 }}>
+      <div style={{ flex: 1, minHeight: 140, padding: '0 14px 10px' }}>
         <LatencyChart history={displayHistory} isSpike={snap.is_spike}/>
       </div>
 
@@ -341,8 +341,8 @@ function NodePanel({ name, svc, onClose }: { name: string; svc: ServiceSnapshot 
               { color: '#ea580c', label: 'Mem' },
             ]}/>
           </div>
-          <div style={{ height: 160, padding: '0 14px 12px', flexShrink: 0 }}>
-            <ResourceChart history={svc.history} dstName={name}/>
+          <div style={{ flex: 1, minHeight: 160, padding: '0 14px 12px' }}>
+            <ResourceChart history={svc.history}/>
           </div>
         </>
       )}
