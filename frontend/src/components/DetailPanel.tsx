@@ -5,13 +5,14 @@ import { CAUSE_META } from '../constants/causes'
 import LatencyChart  from './LatencyChart'
 import ResourceChart from './ResourceChart'
 
-type RangeKey = '1h' | '6h' | '24h' | '7d'
+type RangeKey = '1h' | '6h' | '24h' | '7d' | 'all'
 
 const RANGE_LABELS: { key: RangeKey; label: string }[] = [
   { key: '1h',  label: '1h'  },
   { key: '6h',  label: '6h'  },
   { key: '24h', label: '24h' },
   { key: '7d',  label: '7d'  },
+  { key: 'all', label: 'All' },
 ]
 
 const COLLECTOR_BASE = `http://${window.location.hostname}:9090`

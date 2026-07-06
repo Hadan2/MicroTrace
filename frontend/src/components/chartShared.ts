@@ -3,6 +3,9 @@ import uPlot from 'uplot'
 // LatencyChart·ResourceChart가 공유하는 uPlot 줌/팬·축 로직.
 // 두 차트의 룩앤필과 인터랙션을 한 곳에서 통일한다.
 
+// 최대 확대 시 최소로 보이는 x축 폭(초). 데이터가 1초 간격이라 10초면 충분히 세밀.
+const MIN_ZOOM_SEC = 10
+
 export interface PanZoomState {
   // 사용자가 줌/팬 중이면 true → 새 데이터가 와도 스케일을 유지한다.
   // 완전히 줌아웃(전체 범위 복귀)하면 false로 돌아가 Live 추적을 재개한다.
@@ -50,7 +53,10 @@ export function panZoomPlugin(state: PanZoomState): uPlot.Plugin {
           const curXMin = u.scales.x.min!
           const curXMax = u.scales.x.max!
           const curRange = curXMax - curXMin
-          const newRange = clamp(curRange * factor, fullRange * 0.01, fullRange)
+          // 최소 줌 폭은 절대값(10초). 전체 범위 대비 상대(%)로 하면 넓게 볼수록
+          // 세밀하게 못 파고드는 문제가 생긴다. 데이터가 10초보다 짧으면 그만큼만.
+          const minRange = Math.min(MIN_ZOOM_SEC, fullRange)
+          const newRange = clamp(curRange * factor, minRange, fullRange)
           const anchor   = curXMin + mouseRatio * curRange
           const newXMin  = clamp(anchor - mouseRatio * newRange, b.min, b.max - newRange)
           u.setScale('x', { min: newXMin, max: newXMin + newRange })
@@ -97,15 +103,29 @@ export function panZoomPlugin(state: PanZoomState): uPlot.Plugin {
   }
 }
 
-// x축 시간 눈금 포맷 (시:분 + 날짜 2줄). 두 차트 공통.
-export const timeAxisValues: uPlot.Axis.Values = (_u, splits) =>
-  splits.map(s => {
+// x축 시간 눈금 포맷. 두 차트 공통.
+// 보이는 전체 범위(span)에 따라 라벨을 적응시킨다:
+//  - 넓은 범위(≥2일, 예: All/7d): 눈금이 일 단위라 시:분이 다 00:00으로 겹침
+//    → 상단에 M/D, 하단에 요일 대신 시:분 생략하고 날짜 위주로.
+//  - 좁은 범위(<2일): 시:분 위주(+ 날짜 참고).
+export const timeAxisValues: uPlot.Axis.Values = (u, splits) => {
+  const spanSec = (u.scales.x.max ?? 0) - (u.scales.x.min ?? 0)
+  const DAY = 86400
+  const wideRange = spanSec >= 2 * DAY  // 2일 이상이면 날짜 위주
+
+  return splits.map(s => {
     if (s == null) return ''
     const d = new Date(s * 1000)
     const hhmm = d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
     const md   = `${d.getMonth() + 1}/${d.getDate()}`
+    if (wideRange) {
+      // 날짜를 상단에, 시:분은 자정이 아닐 때만 하단에(대부분 자정이라 보통 비움)
+      return md + '\n' + (hhmm === '00:00' ? '' : hhmm)
+    }
+    // 좁은 범위: 시:분 상단, 날짜 하단
     return hhmm + '\n' + md
   })
+}
 
 // 두 차트 공통 축 스타일.
 export const AXIS_STROKE = '#94a3b8'

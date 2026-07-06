@@ -132,7 +132,7 @@ func main() {
 	log.Println("[main] 종료 완료")
 }
 
-// makeHistoryHandler — GET /api/history?src=&dst=&range=1h|6h|24h|7d
+// makeHistoryHandler — GET /api/history?src=&dst=&range=1h|6h|24h|7d|all
 //
 // db가 nil이면 (SQLite 초기화 실패) 빈 배열을 반환한다.
 func makeHistoryHandler(db *store.Store) http.HandlerFunc {
@@ -159,12 +159,17 @@ func makeHistoryHandler(db *store.Store) http.HandlerFunc {
 			return
 		}
 
-		dur, ok := rangeMap[rangeStr]
-		if !ok {
-			dur = time.Hour // 기본값 1h
+		// "all" = 보관된 전체 데이터(from 하한 없음). 그 외는 range별 하한.
+		var from time.Time // 제로값 = 아주 먼 과거 → 모든 행 포함
+		if rangeStr != "all" {
+			dur, ok := rangeMap[rangeStr]
+			if !ok {
+				dur = time.Hour // 기본값 1h
+			}
+			from = time.Now().Add(-dur)
 		}
 
-		rows, err := db.QueryHistory(src, dst, time.Now().Add(-dur))
+		rows, err := db.QueryHistory(src, dst, from)
 		if err != nil {
 			log.Printf("[api] history 조회 실패: %v", err)
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
