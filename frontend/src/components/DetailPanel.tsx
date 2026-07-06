@@ -236,7 +236,7 @@ export default function DetailPanel({ snap, history, selectedNode, nodeService, 
           </div>
         </div>
       </div>
-      <div style={{ height: 140, padding: '0 14px 8px', flexShrink: 0 }}>
+      <div style={{ height: 140, padding: '0 14px', flexShrink: 0 }}>
         <LatencyChart history={displayHistory} isSpike={snap.is_spike}/>
       </div>
 

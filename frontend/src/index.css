@@ -70,3 +70,8 @@ body {
   width: 100vw;
   min-height: 100vh;
 }
+
+/* uPlot 기본 CSS가 width:min-content로 설정되어 있어 컨테이너를 채우도록 덮어씀 */
+.uplot-fill .uplot {
+  width: 100% !important;
+}
