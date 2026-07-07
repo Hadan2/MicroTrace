@@ -6,7 +6,8 @@
 //   3. Ring Buffer 이벤트를 기다렸다가 JSON으로 stdout 출력 (Go collector가 파싱)
 
 #include <stdio.h>            // printf(), fprintf()
-#include <stdlib.h>           // exit()
+#include <stdlib.h>           // exit(), getenv(), strtoull()
+#include <string.h>          // memset()
 #include <signal.h>           // SIGINT 처리 (Ctrl+C)
 #include <fcntl.h>            // open(), O_RDONLY
 #include <unistd.h>           // close()
@@ -84,10 +85,60 @@ static int handle_event(void *ctx, void *data, size_t size)
     return 0;
 }
 
+// ─────────────────────────────────────────────
+// 벤치마크 모드 (Issue #9 — ②번 구간 부하/전송 측정)
+//
+// MICROTRACE_BENCH_COUNT=N 이 설정되면 eBPF를 아예 거치지 않고
+// 가짜 struct event N개를 최대 속도로 output_event()에 흘려보낸다.
+// collector 입장에선 진짜 이벤트와 구분 불가 → C→Go 직렬화+파이프 구간만
+// 순수 측정된다. 실제 커널/네트워크 변수를 배제하기 위함.
+//
+// JSON vs Protobuf+gRPC 전환 전후를 같은 부하로 비교하는 baseline 생성용.
+// ─────────────────────────────────────────────
+static int run_benchmark(unsigned long long count)
+{
+    // 고정된 가짜 이벤트 하나를 반복 출력한다(값 자체는 무의미, 형식만 실제와 동일).
+    // saddr/daddr는 실제 컨테이너 대역과 비슷한 값으로 채워 파싱 경로를 동일하게 탄다.
+    struct event e;
+    memset(&e, 0, sizeof(e));
+    e.type       = EVENT_TYPE_RTT;
+    e.pid        = 12345;
+    e.saddr      = inet_addr("172.19.0.3"); // network byte order
+    e.daddr      = inet_addr("172.19.0.2");
+    e.dport      = 8080;
+    e.latency_us = 1234;
+    e.jitter_us  = 56;
+
+    // output_event()는 이벤트마다 fflush(stdout)한다(실시간 경로용).
+    // 벤치에서 수백만 개를 flush하면 flush 비용이 직렬화 비용을 가려
+    // JSON vs Protobuf 비교가 왜곡된다. stdout을 큰 버퍼의 full-buffered로
+    // 바꿔 fflush가 실제 write를 자주 일으키지 않게 한다(블록이 찰 때만 write).
+    static char buf[1 << 20]; // 1MB
+    setvbuf(stdout, buf, _IOFBF, sizeof(buf));
+
+    fprintf(stderr, "[bench] 가짜 이벤트 %llu개 최대 속도로 출력 시작\n", count);
+    for (unsigned long long i = 0; i < count; i++) {
+        output_event(&e);
+    }
+    fflush(stdout); // 남은 버퍼 마지막으로 비움
+    fprintf(stderr, "[bench] 출력 완료 (%llu개)\n", count);
+    return 0;
+}
+
 int main(void)
 {
     signal(SIGINT,  handle_signal);
     signal(SIGTERM, handle_signal);
+
+    // ── 벤치마크 모드 분기 (Issue #9) ──────────────────────────
+    // MICROTRACE_BENCH_COUNT=N 이면 eBPF를 건너뛰고 가짜 이벤트 N개만 뿜고 종료.
+    // eBPF attach가 없으므로 root/sudo도 불필요하다.
+    const char *bench = getenv("MICROTRACE_BENCH_COUNT");
+    if (bench && *bench) {
+        unsigned long long count = strtoull(bench, NULL, 10);
+        if (count > 0)
+            return run_benchmark(count);
+    }
 
     // ── 1단계: eBPF skeleton 열기 ──────────────────────────────
     // tcp_trace.skel.h 안에 박힌 .bpf.o 바이트코드를 메모리에 파싱.
