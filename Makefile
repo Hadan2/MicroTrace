@@ -1,7 +1,21 @@
-.PHONY: dev dev-down build-ebpf build-resource collector-test frontend-build
+.PHONY: dev dev-static dev-docker dev-down build-ebpf build-resource collector-test frontend-build
 
 dev:
-	./scripts/dev.sh
+	@if [ -n "$(HOSTS)" ]; then \
+		MICROTRACE_RESOLVER=static MICROTRACE_HOSTS_FILE="$(abspath $(HOSTS))" ./scripts/dev.sh; \
+	else \
+		./scripts/dev.sh; \
+	fi
+
+dev-static:
+	@if [ -z "$(HOSTS)" ]; then \
+		echo "usage: make dev-static HOSTS=collector/hosts.example.yaml"; \
+		exit 1; \
+	fi
+	MICROTRACE_RESOLVER=static MICROTRACE_HOSTS_FILE="$(abspath $(HOSTS))" ./scripts/dev.sh
+
+dev-docker:
+	MICROTRACE_RESOLVER=docker ./scripts/dev.sh
 
 dev-down:
 	@if docker compose version >/dev/null 2>&1; then \

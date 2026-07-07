@@ -7,6 +7,7 @@ require (
 	github.com/moby/moby/api v1.54.0
 	github.com/moby/moby/client v0.3.0
 	golang.org/x/net v0.53.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

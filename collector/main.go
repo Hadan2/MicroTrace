@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,17 +54,7 @@ func main() {
 	go h.Run()
 
 	// ── 3. Resolver 시작 ───────────────────────────────────────────────
-	// DockerResolver: 내부 컨테이너 IP → 컨테이너명
-	// EnrichResolver: DockerResolver가 모르는 외부 IP → rDNS 도메인명
-	// Docker API 연결 실패 시 StaticResolver로 대체 (IP 그대로 표시)
-	var svcResolver resolver.ServiceResolver
-	dockerResolver, err := resolver.NewDockerResolver(ctx)
-	if err != nil {
-		log.Printf("[main] DockerResolver 초기화 실패, StaticResolver로 대체: %v", err)
-		svcResolver = resolver.NewStaticResolver(nil)
-	} else {
-		svcResolver = resolver.NewEnrichResolver(dockerResolver)
-	}
+	svcResolver := buildResolver(ctx)
 
 	// ── 4. Store 시작 ──────────────────────────────────────────────────
 	// SQLite 초기화 실패 시 경고만 내고 저장 없이 계속 진행한다.
@@ -130,6 +122,78 @@ func main() {
 	log.Println("[main] 종료 신호 수신, graceful shutdown 시작")
 	srv.Shutdown(context.Background())
 	log.Println("[main] 종료 완료")
+}
+
+// buildResolver — 실행 환경에 맞는 IP→서비스명 resolver를 선택한다.
+//
+// MICROTRACE_RESOLVER:
+//
+//	auto   기본값. MICROTRACE_HOSTS_FILE이 있으면 static, 없으면 Docker.
+//	docker Docker API 기반 컨테이너 이름 매핑.
+//	static YAML 설정 파일 기반 EC2/멀티호스트 매핑.
+//
+// MICROTRACE_HOSTS_FILE:
+//
+//	static resolver가 읽을 hosts.yaml 경로.
+func buildResolver(ctx context.Context) resolver.ServiceResolver {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("MICROTRACE_RESOLVER")))
+	if mode == "" {
+		mode = "auto"
+	}
+	hostsFile := strings.TrimSpace(os.Getenv("MICROTRACE_HOSTS_FILE"))
+
+	if mode == "auto" && hostsFile != "" {
+		mode = "static"
+	}
+
+	switch mode {
+	case "static":
+		if hostsFile == "" {
+			log.Fatalf("[main] MICROTRACE_RESOLVER=static requires MICROTRACE_HOSTS_FILE")
+		}
+		hostsFile = resolveHostsFilePath(hostsFile)
+		table, err := resolver.LoadStaticTable(hostsFile)
+		if err != nil {
+			log.Fatalf("[main] StaticResolver 설정 로드 실패: %v", err)
+		}
+		log.Printf("[main] StaticResolver 활성화: %s (%s)", hostsFile, resolver.StaticTableSummary(table))
+		return resolver.NewEnrichResolver(resolver.NewStaticResolver(table))
+
+	case "docker", "auto":
+		dockerResolver, err := resolver.NewDockerResolver(ctx)
+		if err != nil {
+			if mode == "docker" {
+				log.Fatalf("[main] DockerResolver 초기화 실패: %v", err)
+			}
+			log.Printf("[main] DockerResolver 초기화 실패, StaticResolver(empty)로 대체: %v", err)
+			return resolver.NewStaticResolver(nil)
+		}
+		log.Printf("[main] DockerResolver 활성화")
+		return resolver.NewEnrichResolver(dockerResolver)
+
+	default:
+		log.Fatalf("[main] MICROTRACE_RESOLVER 값 오류: %q (auto|docker|static 중 하나)", mode)
+		return nil
+	}
+}
+
+// resolveHostsFilePath — collector가 어느 작업 디렉터리에서 실행돼도 hosts 파일을 찾는다.
+//
+// make dev HOSTS=collector/hosts.yaml 는 repo root 기준 경로를 넘기지만,
+// scripts/dev.sh는 collector를 실행하기 전에 cwd를 collector/로 바꾼다.
+// 그래서 현재 cwd 기준 경로를 먼저 보고, 없으면 repo root(../) 기준으로 한 번 더 찾는다.
+func resolveHostsFilePath(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	rootRelative := filepath.Join("..", path)
+	if _, err := os.Stat(rootRelative); err == nil {
+		return rootRelative
+	}
+	return path
 }
 
 // makeHistoryHandler — GET /api/history?src=&dst=&range=1h|6h|24h|7d|all

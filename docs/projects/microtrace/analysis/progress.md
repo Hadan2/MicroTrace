@@ -98,19 +98,19 @@ WebSocket 메시지 타입: `stats` / `event` / `resource` / `remove` / `history
 
 ---
 
-## 현재 상태 (2026-07-06 기준)
+## 현재 상태 (2026-07-07 기준)
 
-- **완료:** 전체 수집 파이프라인 (latency + resource), 대시보드 UI, cause_kind 자동 판별, SQLite 영속성 + 과거 조회 API(§8), LatencyChart uPlot 재작업(줌/팬/range 전환/Live 줌 유지)
+- **완료:** 전체 수집 파이프라인 (latency + resource), 대시보드 UI, cause_kind 자동 판별, SQLite 영속성 + 과거 조회 API(§8), LatencyChart uPlot 재작업(줌/팬/range 전환/Live 줌 유지), StaticResolver YAML 설정 파일 로딩 + 실행 모드 선택
 - **다음:** StaticResolver + EC2 배포 + wrk 부하 테스트 + NFR 실측 (Issue #6)
 - 향후 과제: 대용량 history 조회 다운샘플링(코드맵 §8)
 - 상세: `docs/ai/todo.md`
 
 ---
 
-## Phase 4 — 영속성 + EC2 검증 🔲 미착수
+## Phase 4 — 영속성 + EC2 검증 🔄 진행 중
 
 - SQLite 영속성: StatSnapshot·ResourceSnapshot 7일 보존, 60초 배치 INSERT
-- StaticResolver: IP→서비스 이름 설정 파일 기반 매핑 (EC2 멀티호스트)
+- StaticResolver: IP→서비스 이름 설정 파일 기반 매핑 (EC2 멀티호스트) ✅ 설정 파일 로딩/모드 선택 구현
 - EC2 배포 + wrk 부하 테스트 + NFR 수치 실측
 
 ## Phase 5 — 동적 kprobe/uprobe 🔲 장기

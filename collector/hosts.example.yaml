@@ -1,0 +1,16 @@
+# StaticResolver example for EC2 or other non-Docker environments.
+#
+# Run collector with:
+#   MICROTRACE_RESOLVER=static MICROTRACE_HOSTS_FILE=hosts.example.yaml go run .
+#
+# Form 1: direct IP -> service mapping.
+hosts:
+  10.0.1.10: service-a
+  10.0.2.20: service-b
+
+# Form 2 is also supported:
+# services:
+#   service-a:
+#     - 10.0.1.10
+#   service-b:
+#     - 10.0.2.20

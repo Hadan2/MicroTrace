@@ -22,9 +22,8 @@ fi
 toplevel="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$toplevel" ] && cd "$toplevel"
 
-# working tree + staged 변경(추적 파일의 수정/삭제 + staged 신규). untracked는 제외:
-# 임시 산출물·로그가 매번 권유를 띄우는 노이즈를 막기 위함. (커밋 대상은 보통 추적 파일)
-changed="$(git status --porcelain --untracked-files=no 2>/dev/null)"
+# working tree + staged 변경 + 신규 파일. 단, 일반적인 산출물/캐시는 제외한다.
+changed="$(git status --porcelain --untracked-files=normal 2>/dev/null | grep -Ev '^\?\? (frontend/dist/|collector/microtrace\.db|collector/microtrace\.db-|\.claude/\.cache/)' || true)"
 [ -z "$changed" ] && exit 0
 
 # ── 루프 방지(스탬프) ─────────────────────────────────────────────────────────

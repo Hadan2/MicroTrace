@@ -74,6 +74,18 @@
 make dev
 ```
 
+EC2처럼 Docker API로 IP→서비스명을 자동 조회할 수 없는 환경은 StaticResolver 설정 파일을 지정해 실행합니다.
+
+```bash
+make dev-static HOSTS=collector/hosts.example.yaml
+```
+
+또는 같은 의미로 아래처럼 짧게 실행할 수 있습니다.
+
+```bash
+make dev HOSTS=collector/hosts.example.yaml
+```
+
 실행 후 접속:
 
 | 대상 | 주소 |
