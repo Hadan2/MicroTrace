@@ -1,0 +1,8 @@
+# nanopb 옵션 — 문자열 필드를 가변 콜백 대신 고정 char[N] 배열로 생성한다.
+# (agent C 코드가 단순해지고 힙 할당이 없어짐. +1은 널 종료 문자 몫.)
+# nanopb_generator가 event.proto와 같은 이름의 이 파일을 자동으로 읽는다.
+
+microtrace.Event.type   max_size:11   # "connect"/"rtt"/"retransmit"(10)+1
+microtrace.Event.comm   max_size:17   # 프로세스 이름(16)+1
+microtrace.Event.saddr  max_size:16   # "255.255.255.255"(15)+1
+microtrace.Event.daddr  max_size:16

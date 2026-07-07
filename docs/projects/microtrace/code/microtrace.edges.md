@@ -36,7 +36,7 @@
 
 | 건드리는 기능 | 같이 봐야 할 기능 | 엣지 종류 | 왜 (코드 근거) |
 |---|---|---|---|
-| **TCP 이벤트 필드 추가** (`Event`) | ①`tcp_trace_common.h` `struct event` ②`tcp_trace.bpf.c` `fill_event` ③`tcp_trace.c` `output_event`(JSON) ④`model/event.go` `Event` | 필드 전파(중복 struct) | 프로세스 경계마다 별도 struct. 한 곳만 고치면 파싱 깨짐 (code §1) |
+| **TCP 이벤트 필드 추가** (`Event`) | ①`tcp_trace_common.h` `struct event` ②`tcp_trace.bpf.c` `fill_event` ③`tcp_trace.c` `output_event`(JSON)+`output_event_pb`(Protobuf) ④`agent/event.proto`(문자열이면 `event.options`도) ⑤`model/event.go` `Event` ⑥`reader.go` `readProtobuf` 변환 | 필드 전파(중복 struct) | 프로세스 경계마다 별도 struct. .proto를 고치면 `make -C agent`로 event.pb.* 재생성 + collector `model/pb` protoc 재생성. 한 곳만 고쳐도 파싱 깨짐 (code §1) |
 | **자원 필드 추가** (`ResourceSnapshot`) | ①`resource_agent/main.go` ②`model/event.go` ③`frontend/src/types.ts` `ResourceMsg` ④`useWebSocket.ts` resource 분기 | 필드 전파 | 위와 동일 구조 (code §1) |
 | **집계 결과 필드 추가** (`StatSnapshot`) | ①`model/event.go` ②`stats.go` `publishSnapshots` ③(영속화 시)`store.go` migrate/flush/QueryHistory ④`types.ts` ⑤`useWebSocket.ts` | 필드 전파 | 위와 동일 (code §1) |
 | **연결 식별 키 `"src→dst"`** | backend `stats.publishSnapshots`/`sweepExpired`/`GetHistory` + frontend `useWebSocket` | 포맷 공유(U+2192) | 4곳이 같은 문자열이라야 remove/history 매칭 (code §2) |

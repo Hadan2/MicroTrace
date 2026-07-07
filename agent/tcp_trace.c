@@ -12,10 +12,17 @@
 #include <fcntl.h>            // open(), O_RDONLY
 #include <unistd.h>           // close()
 #include <arpa/inet.h>        // inet_ntoa() - IP를 문자열로 변환
+#include <stdint.h>          // uint32_t (length-prefix)
 #include <bpf/libbpf.h>       // libbpf API (ring_buffer 등)
 #include <bpf/bpf.h>          // bpf_prog_attach(), bpf_prog_detach()
+#include <pb_encode.h>        // nanopb 인코딩 (Issue #9)
 #include "tcp_trace.skel.h"   // bpftool이 자동 생성하는 skeleton 헤더
 #include "tcp_trace_common.h" // 커널/유저 공유 타입 (struct event, EVENT_TYPE_*)
+#include "event.pb.h"        // nanopb 생성 타입 (microtrace_Event)
+
+// 출력 포맷 선택: MICROTRACE_WIRE=pb 면 Protobuf, 아니면 JSON(기본).
+// main()에서 1회 읽어 전역에 보관한다.
+static int use_protobuf = 0;
 
 // ─────────────────────────────────────────────
 // cgroup 경로
@@ -72,6 +79,59 @@ static void output_event(const struct event *e)
     fflush(stdout);
 }
 
+// EVENT_TYPE_* → 문자열. JSON/Protobuf 양쪽에서 쓴다.
+static const char *type_str(uint8_t type)
+{
+    switch (type) {
+    case EVENT_TYPE_RETRANSMIT: return "retransmit";
+    case EVENT_TYPE_RTT:        return "rtt";
+    default:                    return "connect";
+    }
+}
+
+// ─────────────────────────────────────────────
+// Protobuf 출력 함수 (Issue #9)
+//
+// 이벤트를 nanopb로 인코딩해 stdout에 쓴다. 바이너리는 개행으로 경계를
+// 나눌 수 없으므로 각 메시지 앞에 4바이트 길이(little-endian)를 붙인다
+// (length-prefixed framing). collector가 이 길이를 읽고 그만큼 디코딩한다.
+// ─────────────────────────────────────────────
+static void output_event_pb(const struct event *e)
+{
+    microtrace_Event pb = microtrace_Event_init_zero;
+
+    // struct event → protobuf 메시지 (문자열은 고정 char[N]이라 그대로 복사)
+    snprintf(pb.type, sizeof(pb.type), "%s", type_str(e->type));
+    pb.pid = e->pid;
+    snprintf(pb.comm, sizeof(pb.comm), "%s", e->comm);
+
+    struct in_addr sip = { .s_addr = e->saddr };
+    snprintf(pb.saddr, sizeof(pb.saddr), "%s", inet_ntoa(sip));
+    struct in_addr dip = { .s_addr = e->daddr };
+    snprintf(pb.daddr, sizeof(pb.daddr), "%s", inet_ntoa(dip));
+
+    pb.dport = e->dport;
+    // retransmit은 latency/jitter가 0 (구조체가 이미 0으로 채워짐)
+    if (e->type != EVENT_TYPE_RETRANSMIT) {
+        pb.latency_us = e->latency_us;
+        pb.jitter_us  = e->jitter_us;
+    }
+
+    // 고정 버퍼로 인코딩(최대 크기는 필드 상한 합보다 넉넉히).
+    uint8_t buf[128];
+    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
+    if (!pb_encode(&stream, microtrace_Event_fields, &pb)) {
+        fprintf(stderr, "[pb] 인코딩 실패: %s\n", PB_GET_ERROR(&stream));
+        return;
+    }
+
+    // 4바이트 길이 프리픽스(LE) + 메시지 본문.
+    uint32_t len = (uint32_t)stream.bytes_written;
+    fwrite(&len, sizeof(len), 1, stdout);
+    fwrite(buf, 1, len, stdout);
+    fflush(stdout);
+}
+
 // ─────────────────────────────────────────────
 // Ring Buffer 콜백
 //
@@ -81,7 +141,10 @@ static void output_event(const struct event *e)
 static int handle_event(void *ctx, void *data, size_t size)
 {
     struct event *e = data;
-    output_event(e);
+    if (use_protobuf)
+        output_event_pb(e);
+    else
+        output_event(e);
     return 0;
 }
 
@@ -116,9 +179,14 @@ static int run_benchmark(unsigned long long count)
     static char buf[1 << 20]; // 1MB
     setvbuf(stdout, buf, _IOFBF, sizeof(buf));
 
-    fprintf(stderr, "[bench] 가짜 이벤트 %llu개 최대 속도로 출력 시작\n", count);
+    fprintf(stderr, "[bench] 가짜 이벤트 %llu개 최대 속도로 출력 시작 (wire=%s)\n",
+            count, use_protobuf ? "protobuf" : "json");
     for (unsigned long long i = 0; i < count; i++) {
-        output_event(&e);
+        // handle_event를 거쳐 use_protobuf에 따라 JSON/Protobuf를 탄다.
+        if (use_protobuf)
+            output_event_pb(&e);
+        else
+            output_event(&e);
     }
     fflush(stdout); // 남은 버퍼 마지막으로 비움
     fprintf(stderr, "[bench] 출력 완료 (%llu개)\n", count);
@@ -129,6 +197,12 @@ int main(void)
 {
     signal(SIGINT,  handle_signal);
     signal(SIGTERM, handle_signal);
+
+    // ── 출력 포맷 선택 (Issue #9) ──────────────────────────────
+    // MICROTRACE_WIRE=pb 면 Protobuf(length-prefixed), 아니면 JSON(기본).
+    // 벤치·실제 경로 모두 이 값을 본다.
+    const char *wire = getenv("MICROTRACE_WIRE");
+    use_protobuf = (wire && (wire[0] == 'p' || wire[0] == 'P'));
 
     // ── 벤치마크 모드 분기 (Issue #9) ──────────────────────────
     // MICROTRACE_BENCH_COUNT=N 이면 eBPF를 건너뛰고 가짜 이벤트 N개만 뿜고 종료.

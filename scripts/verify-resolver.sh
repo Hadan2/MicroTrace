@@ -114,7 +114,11 @@ log "3/6 collector 빌드 + static 모드로 기동 (NOPASSWD sudo — eBPF atta
 # cwd가 반드시 collector/ 여야 한다. bash -c 'cd ... && exec sudo ...'로
 # exec 치환하면(서브셸을 남기지 않고 sudo가 이 bash -c의 PID를 그대로 이어받음)
 # $!가 서브셸이 아니라 실제 sudo 프로세스를 가리켜 cleanup의 kill이 확실히 먹힌다.
-bash -c "cd '$ROOT_DIR/collector' && exec sudo -n MICROTRACE_RESOLVER=static MICROTRACE_HOSTS_FILE='$HOSTS_FILE' ./collector-bin" >&2 2>&1 &
+#
+# MICROTRACE_WIRE는 현재 환경에서 이어받아 전달한다(비면 agent 기본 json).
+# 이렇게 하면 `MICROTRACE_WIRE=pb ./scripts/verify-resolver.sh`로 실제 eBPF
+# 경로에서 Protobuf 와이어까지 검증할 수 있다(collector·agent가 같은 값을 봄).
+bash -c "cd '$ROOT_DIR/collector' && exec sudo -n MICROTRACE_RESOLVER=static MICROTRACE_HOSTS_FILE='$HOSTS_FILE' MICROTRACE_WIRE='${MICROTRACE_WIRE:-}' ./collector-bin" >&2 2>&1 &
 COLLECTOR_PID=$!
 
 # collector가 실제로 포트 바인딩까지 성공했는지 확인한다.

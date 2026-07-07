@@ -34,10 +34,36 @@ cd collector && MICROTRACE_BENCH_COUNT=3000000 go run ../scripts/bench-pipeline.
   agent는 145만/s를 뿜을 수 있는데 파이프라인은 43만/s로 떨어짐(약 3.5배 감속).
 - → Protobuf 전환의 개선 여지는 collector 측 파싱에 집중될 것으로 예상.
 
-## Protobuf + gRPC (전환 후)
+## Protobuf (nanopb) — 전환 후
 
-_(전환 완료 후 같은 방식으로 재측정해 채운다)_
+agent 출력을 JSON → Protobuf(length-prefixed: 4바이트 LE 길이 + nanopb 본문)로 교체.
+`MICROTRACE_WIRE=pb`로 agent·collector가 같은 포맷을 선택한다(기본은 json, 하위호환 유지).
 
-| 구간 | 처리량 | JSON 대비 |
-|---|---|---|
-| ②번 전체 파이프라인 | TBD | TBD |
+측정: 같은 세션에서 JSON/Protobuf를 3백만 개 3회씩 번갈아 측정(시스템 상태 차이 배제).
+
+| 구간 | JSON | Protobuf | 향상 |
+|---|---|---|---|
+| ②번 전체 파이프라인 처리량 | ~445,000 events/s | **~984,000 events/s** | **약 2.2배** |
+| 이벤트당 와이어 크기 | 140 B (JSON 텍스트) | 44 B (4B 길이 + 40B 본문) | ~1/3 |
+
+- JSON: 446K / 437K / 451K events/s
+- Protobuf: 995K / 965K / 992K events/s (분산도 더 작음)
+
+### 결론
+- baseline에서 예측한 대로 병목은 collector의 JSON 파싱이었고, Protobuf로 바꾸니
+  파이프라인 처리량이 2배 이상으로 뛰었다. 와이어 크기도 1/3로 줄어 네트워크(EC2 #11)에도 유리.
+- stats/hub/store는 그대로. `EventProvider`(SubprocessProvider)가 wire 포맷만 분기하므로
+  집계·spike 로직은 이 변경을 모른다(coding-rules.md 인터페이스 격리 원칙 유지).
+
+## 재현 방법
+
+```bash
+# agent 빌드 (nanopb 필요: apt install protobuf-compiler nanopb libnanopb-dev)
+make -C agent
+
+# JSON baseline
+cd collector && MICROTRACE_BENCH_COUNT=3000000 go run ../scripts/bench-pipeline.go -bin ../agent/tcp_trace
+
+# Protobuf
+cd collector && MICROTRACE_WIRE=pb MICROTRACE_BENCH_COUNT=3000000 go run ../scripts/bench-pipeline.go -bin ../agent/tcp_trace
+```

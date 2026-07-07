@@ -18,6 +18,11 @@ BPF_CFLAGS := -g -O2 -target bpf -D__TARGET_ARCH_x86 \
 # libbpf 링크 옵션 (유저 공간 컴파일 시)
 LDFLAGS  := -lbpf -lelf -lz
 
+# nanopb (Issue #9) — Protobuf 인코딩. 헤더는 /usr/include/nanopb,
+# 런타임은 정적 라이브러리 libprotobuf-nanopb.a 를 링크한다.
+NANOPB_CFLAGS := -I/usr/include/nanopb
+NANOPB_LDFLAGS := -lprotobuf-nanopb
+
 # ── 빌드 타겟 ──────────────────────────────────
 
 # 기본 타겟: all → tcp_trace 실행 파일 생성
@@ -36,15 +41,18 @@ tcp_trace.bpf.o: tcp_trace.bpf.c
 tcp_trace.skel.h: tcp_trace.bpf.o
 	$(BPFTOOL) gen skeleton $< > $@
 
-# 3단계: tcp_trace.c + skeleton → 실행 파일
-#   -lbpf : libbpf 라이브러리 링크
-#   -lelf : ELF 파일 파싱 (libbpf 의존성)
-#   -lz   : zlib 압축 (libbpf 의존성)
-tcp_trace: tcp_trace.c tcp_trace.skel.h
-	$(CC) -o $@ $< $(LDFLAGS)
+# 3단계: tcp_trace.c + event.pb.c + skeleton → 실행 파일
+#   event.pb.c : nanopb 생성 코드 (event.proto → 인코딩 디스크립터)
+#   -lprotobuf-nanopb : nanopb 런타임(pb_encode/pb_decode/pb_common)
+tcp_trace: tcp_trace.c event.pb.c tcp_trace.skel.h
+	$(CC) $(NANOPB_CFLAGS) -o $@ tcp_trace.c event.pb.c $(LDFLAGS) $(NANOPB_LDFLAGS)
+
+# event.proto → event.pb.c/.h (+ event.options 자동 반영)
+event.pb.c event.pb.h: event.proto event.options
+	nanopb_generator event.proto
 
 # 빌드 결과물 삭제
 clean:
-	rm -f tcp_trace tcp_trace.bpf.o tcp_trace.skel.h
+	rm -f tcp_trace tcp_trace.bpf.o tcp_trace.skel.h event.pb.c event.pb.h
 
 .PHONY: all clean

@@ -1,0 +1,38 @@
+// event.proto — agent(C) → collector(Go) 이벤트 직렬화 스키마 (Issue #9)
+//
+// JSON 텍스트 대신 이 Protobuf 메시지로 인코딩해 collector 파싱 비용을 줄인다.
+// 필드는 collector의 model.Event(model/event.go)와 1:1로 맞춘다.
+// IP는 agent가 inet_ntoa로 문자열화한 값을 그대로 담는다(collector·resolver가
+// 문자열 IP를 기대하므로 — raw uint32로 바꾸면 파급이 크다. Issue #9 범위 밖).
+//
+// ★ 필드 전파 지도(edges.md §1): TCP 이벤트 필드는 아래 4곳이 동기화돼야 한다.
+//   ① tcp_trace_common.h struct event  ② tcp_trace.bpf.c fill_event
+//   ③ 직렬화(이 .proto + output_event)  ④ collector model/event.go Event
+//   필드 추가 시 네 곳 모두 고칠 것.
+//
+// C 코드 생성:  protoc --nanopb_out=. event.proto
+// Go 코드 생성: protoc --go_out=. --go_opt=paths=source_relative event.proto
+
+syntax = "proto3";
+
+package microtrace;
+
+// collector의 Go 패키지 경로. protoc-gen-go가 생성 파일 package 경로에 사용.
+option go_package = "microtrace/collector/model/pb";
+
+// nanopb 옵션(문자열 max_size)은 event.options 파일로 분리했다.
+// nanopb_generator가 같은 이름의 .options를 자동으로 읽어 문자열을 고정
+// char[N] 배열로 만든다. 이렇게 하면 이 .proto가 nanopb.proto에 의존하지
+// 않아 Go(protoc-gen-go) 생성 코드가 깨끗해진다.
+
+// Event — 하나의 TCP 이벤트. model.Event와 필드가 일치한다.
+message Event {
+  string type = 1;         // "connect" | "rtt" | "retransmit"
+  uint32 pid = 2;          // sock_ops 제약으로 local_port 대체
+  string comm = 3;         // 프로세스 이름 (sock_ops에선 항상 빈 문자열)
+  string saddr = 4;        // 출발지 IPv4 문자열 (예: "172.19.0.3")
+  string daddr = 5;        // 목적지 IPv4 문자열
+  uint32 dport = 6;        // 목적지 포트
+  uint64 latency_us = 7;   // RTT(마이크로초). retransmit에서는 0
+  uint64 jitter_us = 8;    // RTT 변동폭. retransmit에서는 0
+}

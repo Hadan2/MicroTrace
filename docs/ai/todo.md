@@ -7,24 +7,39 @@
 
 ## 지금 하고 있는 작업
 
-**Issue #9: agent↔collector Protobuf+gRPC 전환 + 부하 측정**
+**Issue #9: agent↔collector 직렬화 JSON → Protobuf(nanopb) 전환 + 부하 측정**
 
 ### 왜
-agent(C) → collector(Go) 구간이 raw 이벤트를 JSON 텍스트로 직렬화 → stdout 파이프 →
-재파싱하는 구조라, 부하가 커지면 문자열 변환 비용이 latency 측정 오버헤드에 섞인다.
-또 EC2 멀티호스트로 가면 서버 간 통신 수단이 필요하다. 둘을 Protobuf+gRPC로 함께 해결한다.
-전환 전후를 **측정으로 비교**해 개선을 수치로 증명한다.
+agent(C) → collector(Go) 구간(②번, 같은 서버·파이프)이 raw 이벤트를 JSON 텍스트로
+직렬화 → 재파싱하는 구조라, 부하가 커지면 collector의 json.Unmarshal이 병목이 된다
+(baseline 측정 확인: agent 단독 145만/s인데 파이프라인은 43만/s로 3.5배 감속).
+JSON을 Protobuf 바이너리로 바꿔 파싱 비용을 줄이고, 전후를 측정으로 비교한다.
 
-### 구현 순서 (측정으로 증명)
-1. **[측정 준비]** agent에 부하 생성용 테스트 모드 추가 (가짜 struct event를 초당 N개 생성) ← 지금 여기
-2. **[측정 1]** JSON 상태 baseline 측정 (처리량·직렬화/역직렬화 지연·CPU)
-3. **[전환]** .proto 정의 + gRPC 스트리밍 구현, collector에 gRPC EventProvider 주입
-4. **[측정 2]** 동일 조건(localhost) 재측정 → JSON vs Protobuf+gRPC 비교표
-5. **[문서]** 측정 결과 정리
+### 아키텍처 결정 (2026-07-07)
+- **gRPC는 이 이슈 범위 아님 → #11(EC2)로.** gRPC가 푸는 문제("서버가 나뉘어도 통신")는
+  서버를 나눌 때만 생긴다. 지금은 같은 서버·파이프라 gRPC 불필요.
+- agent(C)는 **초경량 유지가 원칙**(eBPF 수집만, 커널에 붙어 24시간 도는 민감 부분).
+  무거운 gRPC C++ 라이브러리(수십 MB)를 agent에 넣지 않는다.
+- 직렬화 포맷은 **nanopb**(초경량 C protobuf, 수십 KB) 선택. raw 구조체 대비:
+  endian/레이아웃 안전 + 필드 추가 하위호환. #11에서 collector 간 gRPC도 protobuf라
+  같은 .proto를 공유해 포맷이 통일된다(raw로 갔다 다시 바꾸는 이중 작업 방지).
+- 현업 구조(참고): agent(C, 경량) ──파이프──▶ collector(Go)가 gRPC 담당.
+  EC2에선 collector를 A용(간소화+전송)/B용(중앙)으로 나눠 Go↔Go gRPC 통신.
 
-### 완료 기준
-gRPC 구현체로 교체해도 stats/hub 변경 없이 spike 감지 동작. JSON vs gRPC 비교 수치 문서화.
-verify-resolver.sh 검증 통과 유지.
+### 구현 순서
+1. **[측정 준비]** agent 벤치 모드 (MICROTRACE_BENCH_COUNT) ✅
+2. **[측정 1]** JSON baseline ✅ (~445K events/s)
+3. **[전환]** nanopb 도입 ✅
+   - event.proto + event.options(문자열 고정 char[N]) 정의
+   - agent(C): output_event_pb(length-prefixed nanopb), MICROTRACE_WIRE=pb로 선택
+   - collector(Go): reader.go readProtobuf, model/pb 생성 코드
+4. **[측정 2]** 재측정 ✅ (Protobuf ~984K events/s, JSON 대비 2.2배)
+5. **[문서]** analysis/grpc-bench.md 비교표 ✅ + edges.md 필드전파 갱신 ✅
+
+### 완료 상태
+✅ Protobuf 전환 후 stats/hub/store 변경 없이 spike 감지 동작(verify-resolver.sh
+   MICROTRACE_WIRE=pb 통과). JSON 하위호환 유지. 처리량 2.2배·와이어 크기 1/3.
+→ **Issue #9 완료. 다음은 #11(EC2)에서 이 protobuf를 gRPC로 서버 간 전송.**
 
 ---
 
