@@ -126,14 +126,14 @@ func (h *Hub) ServeWs(w http.ResponseWriter, r *http.Request) {
 
 	c := &client{conn: conn}
 
+	// 신규 클라이언트 등록과 히스토리 전송을 같은 락 구간에서 처리한다.
+	// WriteMessage를 lock 밖에서 호출하면 Run()의 브로드캐스트 루프가 동시에
+	// 같은 conn에 쓸 수 있어 gorilla/websocket이 패닉한다("concurrent write to
+	// websocket connection") — Run()이 h.mu를 잡고서만 쓰는 규칙과 맞춰야 한다.
 	h.mu.Lock()
 	h.clients[conn] = c
 	count := len(h.clients)
-	h.mu.Unlock()
 
-	log.Printf("[hub] 클라이언트 연결: %s (현재 %d명)", r.RemoteAddr, count)
-
-	// 신규 클라이언트에게 히스토리 전송
 	if h.historyFn != nil {
 		history := h.historyFn()
 		if len(history) > 0 {
@@ -143,6 +143,9 @@ func (h *Hub) ServeWs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	h.mu.Unlock()
+
+	log.Printf("[hub] 클라이언트 연결: %s (현재 %d명)", r.RemoteAddr, count)
 
 	// ReadMessage 루프 — 클라이언트 연결 끊김 감지용 goroutine
 	// 브라우저 탭 닫힘 / 네트워크 끊김 → ReadMessage 에러 → unregister
