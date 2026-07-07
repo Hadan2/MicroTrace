@@ -2,6 +2,10 @@
 collector/microtrace.db
 collector/microtrace.db-shm
 collector/microtrace.db-wal
+# collector가 cwd 밖(repo 루트)에서 실행되면 여기에도 생긴다
+microtrace.db
+microtrace.db-shm
+microtrace.db-wal
 
 # 빌드 바이너리
 agent/tcp_trace
@@ -9,3 +13,7 @@ agent/tcp_trace.bpf.o
 agent/tcp_trace.skel.h
 resource_agent/resource_agent
 collector/collector
+collector/collector-bin
+
+# 참고: agent/event.pb.{c,h}, collector/model/pb/*.pb.go 는 생성 코드지만
+# 커밋 유지한다(nanopb/protoc 없는 환경에서도 빌드 가능하게, Go 관례도 .pb.go 커밋).
