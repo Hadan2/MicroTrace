@@ -43,22 +43,14 @@ cleanup() {
   trap - EXIT INT TERM
   log "정리 중..."
 
-  # collector는 root(sudo) 소유 자식 프로세스라 일반 kill로 안 죽는다.
-  #
-  # "go run ."은 부모(go 툴체인 래퍼)가 자식으로 실제 컴파일된 바이너리를
-  # (~/.cache/go-build/.../collector 경로) spawn하는 구조다. 부모를 죽여도
-  # 이미 뜬 자식 바이너리는 안 죽는다 — 그래서 부모/자식을 각각 패턴으로 잡는다.
-  # "go run ." 문자열은 흔하므로 hosts.verify.yaml 경로로 좁혀 다른 go run
-  # 프로세스(예: 평소 make dev)를 잘못 죽이지 않게 한다.
+  # root(sudo) 소유 프로세스라도 일반 kill(같은 세션)로 시그널 전달이 되고,
+  # collector 자신이 SIGTERM을 받아 graceful shutdown(agent/resource_agent
+  # 자식까지 정리)하므로 pkill/sudo 없이 $COLLECTOR_PID 하나로 충분하다.
   if [[ -n "$COLLECTOR_PID" ]] && kill -0 "$COLLECTOR_PID" 2>/dev/null; then
-    kill "$COLLECTOR_PID" 2>/dev/null || true
+    kill -TERM "$COLLECTOR_PID" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$COLLECTOR_PID" 2>/dev/null || true
   fi
-  sudo pkill -TERM -f "MICROTRACE_HOSTS_FILE=$HOSTS_FILE" 2>/dev/null || true
-  sudo pkill -TERM -f "go-build.*/collector$" 2>/dev/null || true
-  sleep 1
-  sudo pkill -KILL -f "MICROTRACE_HOSTS_FILE=$HOSTS_FILE" 2>/dev/null || true
-  sudo pkill -KILL -f "go-build.*/collector$" 2>/dev/null || true
-  sudo pkill -TERM -f "tcp_trace" 2>/dev/null || true
 
   if [[ "${#COMPOSE_CMD[@]}" -gt 0 && "${KEEP_CONTAINERS:-0}" != "1" ]]; then
     "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" down --remove-orphans >/dev/null 2>&1 || true
@@ -107,16 +99,22 @@ done
 log "생성된 매핑:"; sed 's/^/    /' "$HOSTS_FILE" >&2
 
 # ── 3. collector를 static 모드로 기동 ─────────────────────────────
-# eBPF attach에 root가 필요하므로 sudo. -E로 env(MICROTRACE_*)를 넘긴다.
-log "3/6 collector를 static 모드로 기동 (sudo — eBPF attach)..."
-sudo -v || fail "sudo 권한 필요(eBPF attach)"
-(
-  cd "$ROOT_DIR/collector"
-  sudo -n -E env \
-    MICROTRACE_RESOLVER=static \
-    MICROTRACE_HOSTS_FILE="$HOSTS_FILE" \
-    go run . >&2 2>&1
-) &
+# eBPF attach에 root가 필요하다. /etc/sudoers.d/microtrace 에 이 프로젝트의
+# collector-bin/tcp_trace 두 바이너리만 NOPASSWD + SETENV로 등록해뒀으므로
+# 비밀번호 프롬프트 없이(비대화형으로) 실행 가능하다. 그 외 모든 sudo 명령은
+# 여전히 비밀번호가 필요하다 — 이 스크립트가 다른 시스템 권한을 얻는 건 아니다.
+#
+# go run 대신 미리 빌드한 고정 경로(collector-bin)를 쓰는 이유:
+#   go run은 매번 새 임시 바이너리를 만들어서 (a) sudoers가 특정 경로로
+#   화이트리스트할 수 없고 (b) pkill 패턴 매칭이 불안정해 좀비를 남긴 적이 있다.
+log "3/6 collector 빌드 + static 모드로 기동 (NOPASSWD sudo — eBPF attach)..."
+(cd "$ROOT_DIR/collector" && go build -o collector-bin .) || fail "collector 빌드 실패"
+
+# collector는 ../agent/tcp_trace 같은 상대경로로 agent 바이너리를 찾으므로
+# cwd가 반드시 collector/ 여야 한다. bash -c 'cd ... && exec sudo ...'로
+# exec 치환하면(서브셸을 남기지 않고 sudo가 이 bash -c의 PID를 그대로 이어받음)
+# $!가 서브셸이 아니라 실제 sudo 프로세스를 가리켜 cleanup의 kill이 확실히 먹힌다.
+bash -c "cd '$ROOT_DIR/collector' && exec sudo -n MICROTRACE_RESOLVER=static MICROTRACE_HOSTS_FILE='$HOSTS_FILE' ./collector-bin" >&2 2>&1 &
 COLLECTOR_PID=$!
 
 # collector가 실제로 포트 바인딩까지 성공했는지 확인한다.
@@ -130,7 +128,7 @@ for _ in $(seq 1 10); do
     break
   fi
   if ! kill -0 "$COLLECTOR_PID" 2>/dev/null; then
-    break # 서브셸이 이미 죽음 — 재시도해도 의미 없음
+    break # collector 프로세스가 이미 죽음 — 재시도해도 의미 없음
   fi
   sleep 1
 done

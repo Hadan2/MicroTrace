@@ -44,7 +44,7 @@ cleanup() {
 
   # sudo로 실행된 collector(root 프로세스)는 PIDS에 안 잡힘.
   # 프로세스 이름으로 직접 찾아서 종료한다.
-  sudo pkill -TERM -f "collector/.*go run\|go-build.*collector" 2>/dev/null || true
+  sudo pkill -TERM -f "collector-bin" 2>/dev/null || true
   sudo pkill -TERM -f "tcp_trace" 2>/dev/null || true
   sudo pkill -TERM -f "resource_agent" 2>/dev/null || true
 
@@ -107,12 +107,20 @@ preflight_collector_permission() {
 run_collector() {
   cd "$ROOT_DIR/collector"
 
+  # go run은 매번 새 임시 바이너리를 만들어 실행한다 — sudo pkill 패턴으로
+  # 부모(go 툴체인)만 죽고 자식(실제 실행 바이너리)이 좀비로 남는 사고가 났었다.
+  # 고정 경로(collector-bin)로 미리 빌드해두면 pkill 매칭도 안정적이고,
+  # /etc/sudoers.d/microtrace 에 이 경로를 NOPASSWD로 등록해두면
+  # (이 프로젝트 collector/agent 바이너리에 한해서만 적용, 그 외 sudo는 여전히 비밀번호 필요)
+  # 매번 비밀번호를 묻지 않고도 eBPF attach가 가능하다.
+  go build -o collector-bin . || { printf '[collector] 빌드 실패\n' >&2; exit 1; }
+
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-    exec go run .
+    exec ./collector-bin
   fi
 
   if command -v sudo >/dev/null 2>&1; then
-    exec sudo -n -E go run .
+    exec sudo -n -E ./collector-bin
   fi
 
   printf '[collector] root permission is required to attach eBPF programs, but sudo was not found.\n' >&2
