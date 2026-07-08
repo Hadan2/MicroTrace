@@ -23,11 +23,14 @@
   .claude/                   ⑥ AI 규칙 (원본)
     CLAUDE.md     마스터 인덱스(≤200줄, 세션 자동 로드)
     rules/        ai-behavior · coding-rules · commit-convention (필요할 때만 로드)
-    skills/update-docs/  코드 변경 → 문서 동기화 스킬
+    skills/update-docs/  코드 변경 → 문서 동기화 스킬 (원본; Codex는 심링크로 참조 — 아래)
     hooks/        check-docs-sync.sh · suggest-commit.sh (Stop hook)
     settings.json Stop hook 등록
   .codex/                    Codex용 Stop hook (위 .claude/hooks/*.sh 재사용)
     hooks.json    trusted 등록 + /hooks 승인 필요 (절차는 AGENTS.md)
+  (Codex는 스킬을 전역 ~/.codex/skills/ 에서만 찾음 → update-docs는
+   ~/.codex/skills/microtrace-update-docs 심링크로 등록. NetSim 등 다른 프로젝트에
+   같은 패턴을 쓸 땐 반드시 다른 이름(예: netsim-update-docs)으로 걸 것 — 상세는 AGENTS.md)
 docs/
   README.md                  ← 이 파일 (문서 지도)
   ai/todo.md                 "지금 하고 있는 작업 하나" 기록
