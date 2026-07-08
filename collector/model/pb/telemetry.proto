@@ -1,0 +1,48 @@
+// telemetry.proto — collector(edge) -> collector(central) gRPC telemetry.
+//
+// EC2 multi-host mode keeps the C/eBPF agent local and lightweight:
+// agent(C) -> local pipe -> edge collector(Go) -> gRPC -> central collector(Go).
+// The central collector converts these messages back into model.Event and
+// model.ResourceSnapshot, then feeds the existing stats/hub/store pipeline.
+
+syntax = "proto3";
+
+package microtrace;
+
+option go_package = "microtrace/collector/model/pb";
+
+service TelemetryService {
+  rpc StreamEvents(stream TelemetryEvent) returns (StreamAck);
+  rpc StreamResources(stream TelemetryResource) returns (StreamAck);
+}
+
+message TelemetryEvent {
+  string type = 1;
+  uint32 pid = 2;
+  string comm = 3;
+  string saddr = 4;
+  string daddr = 5;
+  uint32 dport = 6;
+  uint64 latency_us = 7;
+  uint64 jitter_us = 8;
+}
+
+message TelemetryResource {
+  string service_name = 1;
+  int64 timestamp_ms = 2;
+  double cpu_pct = 3;
+  double cpu_throttle_pct = 4;
+  uint64 mem_current_bytes = 5;
+  uint64 mem_limit_bytes = 6;
+  double mem_pressure_pct = 7;
+  uint64 io_read_bytes_per_s = 8;
+  uint64 io_write_bytes_per_s = 9;
+  double io_wait_pct = 10;
+  uint64 oom_kill_count = 11;
+  double psi_mem_some_pct = 12;
+  double psi_mem_full_pct = 13;
+}
+
+message StreamAck {
+  uint64 received = 1;
+}

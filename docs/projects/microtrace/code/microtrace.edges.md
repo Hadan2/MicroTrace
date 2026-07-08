@@ -21,7 +21,7 @@
 | `e->pid`/`e->saddr`/`comm` | 커널 sock_ops | read-only | `agent/tcp_trace.bpf.c` | ⚠️ sock_ops 제약: `pid`엔 실제로 `local_port`가 들어감, `comm`은 항상 빈 문자열. 이름과 내용이 다르다 — 해석 시 주의 |
 | cgroup 카운터 (usage_usec, throttled, memory.events…) | cgroup v2 | read-only | `resource_agent/main.go` `readSnapshot` | 누적 카운터. 첫 tick은 delta 불가라 출력 안 함(`hasPrev=false`). delta는 우리 파생 |
 | 컨테이너 IP→이름 매핑 | Docker API | read-only(캐시) | `collector/resolver/resolver.go` `DockerResolver` | Docker가 준 진실. `watchEvents`로 갱신만. 임의 수정 금지 |
-| EC2 IP→서비스명 매핑 | 사용자 설정 파일 | read-only(런타임 입력) | `collector/resolver/static.go` `LoadStaticTable` | static 모드에서는 이 파일이 내부/외부 판정과 서비스 이름의 기준. 코드가 임의 보정하지 말고 설정 오류를 드러낼 것 |
+| EC2 IP→서비스명 매핑 | 사용자 설정 파일 | read-only(런타임 입력) | `collector/resolver/static.go` `LoadStaticTable` | static/central 모드에서는 이 파일이 내부/외부 판정과 서비스 이름의 기준. 코드가 임의 보정하지 말고 설정 오류를 드러낼 것 |
 | eBPF `jitter_us` 필드 | 커널이 계산해 전송 | **데드 데이터** | `agent/tcp_trace.c` → `model/event.go` | ★ collector가 **안 씀**. Go가 mdev 재계산. "값이 이상하다"고 여길 고치지 말 것 — 애초에 파이프라인 미사용 |
 | RTT 링버퍼 percentiles(p50/p95/p99) | 우리 코드 | 가변(파생) | `collector/stats/stats.go` `percentiles` | 버그 시 여기를 의심. 원시 RTT가 아니라 우리 계산 |
 | `cause_kind`/`signal` | 우리 코드 | 가변(파생) | `collector/stats/stats.go` `detectCause` | 판별 규칙은 우리 것. 규칙 바꾸면 여기만 |
@@ -40,9 +40,10 @@
 | **자원 필드 추가** (`ResourceSnapshot`) | ①`resource_agent/main.go` ②`model/event.go` ③`frontend/src/types.ts` `ResourceMsg` ④`useWebSocket.ts` resource 분기 | 필드 전파 | 위와 동일 구조 (code §1) |
 | **집계 결과 필드 추가** (`StatSnapshot`) | ①`model/event.go` ②`stats.go` `publishSnapshots` ③(영속화 시)`store.go` migrate/flush/QueryHistory ④`types.ts` ⑤`useWebSocket.ts` | 필드 전파 | 위와 동일 (code §1) |
 | **연결 식별 키 `"src→dst"`** | backend `stats.publishSnapshots`/`sweepExpired`/`GetHistory` + frontend `useWebSocket` | 포맷 공유(U+2192) | 4곳이 같은 문자열이라야 remove/history 매칭 (code §2) |
-| **`detectCause` 판별 규칙** | `resource_agent` 컨테이너명 = resolver `ConnKey.Dst` | 이름 키 일치 | dst 자원을 찾으려면 양쪽 이름이 같아야 함. EC2(StaticResolver)면 매핑표를 양쪽 일관되게 (code §6) |
+| **`detectCause` 판별 규칙** | `resource_agent` `service_name` = resolver `ConnKey.Dst` | 이름 키 일치 | dst 자원을 찾으려면 양쪽 이름이 같아야 함. EC2(StaticResolver)면 `MICROTRACE_SERVICE_NAME`과 hosts.yaml을 일관되게 (code §6) |
 | **`resolver.IsInternal`** | `stats.nodeType` → `detectCause`의 `external` 분기 | 데이터 공급 | internal/external 오판이 cause를 바꾼다 (code §7) |
 | **StaticResolver 설정 파일** | `main.go` `buildResolver` + `stats.nodeType` + cause 판별 | 런타임 설정 공유 | `MICROTRACE_HOSTS_FILE`의 IP만 internal. 누락된 EC2 IP는 external로 분류되어 cause가 `external`로 바뀔 수 있음 |
+| **EC2 edge resource 이름** | `resource_agent` `MICROTRACE_SERVICE_NAME` + StaticResolver 서비스명 | 이름 키 일치 | central cause 판별은 `ConnKey.Dst`로 `resources[svc]`를 찾는다. edge의 `MICROTRACE_SERVICE_NAME`과 hosts.yaml 서비스명이 다르면 자원 증거가 붙지 않음 |
 | **spike 판정 `isSpike`/`updateStableP99`** | frontend `is_spike false→true` → SpikeEvent 생성 | 이벤트 결합 | 백엔드 spike 플래그가 프론트 이벤트 로그를 만든다 (code §4·§10) |
 | **`Broadcast` 큐(512)** | SQLite `store` | 신뢰성 분담 | WS는 버퍼 풀이면 **드롭**(best-effort), 영속 보장은 store가 담당 (code §9) |
 
@@ -56,7 +57,7 @@
 2. **`struct event` 필드 순서** — 크기 내림차순 배치라야 clang(bpf.c)·gcc(trace.c)가 같은 레이아웃으로 읽는다. 순서만 바꿔도 파싱이 깨진다.
 3. **RTT 단위 해석** — 커널 `srtt_us`는 ×8 고정소수점. `>>3`을 빠뜨리면 값이 8배로 나오지만 컴파일은 통과.
 4. **`ConnKey` vs `FlowKey`** — 전자는 서비스 간 집계 단위, 후자는 소켓별 mdev 단위. 섞으면 jitter가 엉킨다(mdev는 소켓 상태).
-5. **이름 키 일치**(§6) — resource_agent 컨테이너명 ≠ resolver `ConnKey.Dst`면 cause가 dst 자원을 못 찾는다. 로컬 Docker는 일치, EC2는 수동 정합 필요.
+5. **이름 키 일치**(§6) — resource_agent `service_name` ≠ resolver `ConnKey.Dst`면 cause가 dst 자원을 못 찾는다. 로컬 Docker는 컨테이너명으로 일치, EC2는 `MICROTRACE_SERVICE_NAME`과 hosts.yaml 서비스명 수동 정합 필요.
 6. **프론트 `CauseKind`에 dead `'io'`** — `types.ts`/`CAUSE_META`에 `'io'`가 있으나 `detectCause`는 절대 반환 안 함. io UI는 dead path.
 7. **백엔드가 보내는데 프론트 타입에 없는 필드** — `CauseSignal`, `DstCPUThrottlePct`는 backend가 전송하나 `types.ts` `StatSnapshot`엔 없음. 프론트에서 쓰려면 타입 추가 필요.
 8. **`NODE_POS`는 mock 이름 전용** — `constants/topology.ts` 좌표 키(`api-gateway` 등)는 mockup용. 실제 testenv 컨테이너명(`testenv-service-a-1`)과 안 맞음.

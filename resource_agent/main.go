@@ -53,9 +53,9 @@ type ResourceSnapshot struct {
 
 // cpuPrev — CPU delta 계산을 위한 이전 tick 상태
 type cpuPrev struct {
-	usageUsec    uint64
-	throttledUs  uint64
-	nrThrottled  uint64
+	usageUsec   uint64
+	throttledUs uint64
+	nrThrottled uint64
 }
 
 // ioPrev — IO delta 계산을 위한 이전 tick 상태
@@ -80,6 +80,7 @@ type containerState struct {
 
 func main() {
 	interval := resolveInterval()
+	serviceOverride := strings.TrimSpace(os.Getenv("MICROTRACE_SERVICE_NAME"))
 
 	cli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 	if err != nil {
@@ -94,10 +95,14 @@ func main() {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	log.Printf("[resource_agent] 시작 — 수집 주기: %v", interval)
+	if serviceOverride != "" {
+		log.Printf("[resource_agent] 시작 — 수집 주기: %v, service_name override=%s", interval, serviceOverride)
+	} else {
+		log.Printf("[resource_agent] 시작 — 수집 주기: %v", interval)
+	}
 
 	for range ticker.C {
-		collect(cli, stateMap, stdout, interval)
+		collect(cli, stateMap, stdout, interval, serviceOverride)
 	}
 }
 
@@ -113,7 +118,7 @@ func resolveInterval() time.Duration {
 }
 
 // collect — 전체 컨테이너를 한 번 순회하며 스냅샷을 수집하고 stdout으로 출력한다.
-func collect(cli *dockerclient.Client, stateMap map[string]*containerState, w *bufio.Writer, interval time.Duration) {
+func collect(cli *dockerclient.Client, stateMap map[string]*containerState, w *bufio.Writer, interval time.Duration, serviceOverride string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -131,6 +136,10 @@ func collect(cli *dockerclient.Client, stateMap map[string]*containerState, w *b
 		if name == "" {
 			continue
 		}
+		serviceName := name
+		if serviceOverride != "" {
+			serviceName = serviceOverride
+		}
 
 		cgroupPath, err := resolveCgroupPath(c.ID, cli)
 		if err != nil {
@@ -144,7 +153,7 @@ func collect(cli *dockerclient.Client, stateMap map[string]*containerState, w *b
 			stateMap[name] = st
 		}
 
-		snap, err := readSnapshot(name, cgroupPath, st, now, intervalSec)
+		snap, err := readSnapshot(serviceName, cgroupPath, st, now, intervalSec)
 		if err != nil {
 			log.Printf("[resource_agent] %s: 스냅샷 수집 실패: %v", name, err)
 			continue
@@ -262,7 +271,7 @@ func readSnapshot(name, cgroupPath string, st *containerState, nowMs int64, inte
 	if !st.hasPrev {
 		// 첫 tick: 기준값 저장만 하고 반환하지 않음
 		st.cpuPrev = cpuCur
-		st.ioPrev  = ioCur
+		st.ioPrev = ioCur
 		st.memPrev = memEvCur
 		st.hasPrev = true
 		return nil, nil
@@ -287,12 +296,12 @@ func readSnapshot(name, cgroupPath string, st *containerState, nowMs int64, inte
 	// 메모리 압력: high 이벤트 발생 여부를 0-100 지수로 표현
 	// high 이벤트가 1이상 발생했으면 50%, 2이상이면 75%, ... 으로 비율을 적용
 	deltaHigh := safeDeltaU64(memEvCur.high, st.memPrev.high)
-	deltaOOM  := safeDeltaU64(memEvCur.oomKill, st.memPrev.oomKill)
+	deltaOOM := safeDeltaU64(memEvCur.oomKill, st.memPrev.oomKill)
 	memPressurePct := memPressureScore(deltaHigh)
 
 	// 기준값 갱신
 	st.cpuPrev = cpuCur
-	st.ioPrev  = ioCur
+	st.ioPrev = ioCur
 	st.memPrev = memEvCur
 
 	return &ResourceSnapshot{

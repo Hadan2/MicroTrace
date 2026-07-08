@@ -177,7 +177,7 @@ else
   log "collector skipped by SKIP_COLLECTOR=1"
 fi
 
-start_bg testenv "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" up --build
+start_bg testenv "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" up --build --force-recreate
 
 # Give Docker Compose a small head start so service traffic is flowing before UI opens.
 sleep "${DEV_BOOT_DELAY:-3}"

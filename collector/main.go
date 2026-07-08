@@ -29,6 +29,7 @@ import (
 	"microtrace/collector/agent"
 	"microtrace/collector/hub"
 	"microtrace/collector/model"
+	"microtrace/collector/remote"
 	"microtrace/collector/resolver"
 	"microtrace/collector/resource"
 	"microtrace/collector/stats"
@@ -39,6 +40,7 @@ const (
 	agentBinary         = "../agent/tcp_trace"
 	resourceAgentBinary = "../resource_agent/resource_agent"
 	listenAddr          = ":9090"
+	grpcListenAddr      = ":9191"
 	dbPath              = "microtrace.db"
 )
 
@@ -49,24 +51,134 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// ── 2. Hub 시작 ────────────────────────────────────────────────────
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("MICROTRACE_MODE")))
+	if mode == "" {
+		mode = "local"
+	}
+
+	switch mode {
+	case "local":
+		runLocal(ctx)
+	case "edge":
+		runEdge(ctx)
+	case "central":
+		runCentral(ctx)
+	default:
+		log.Fatalf("[main] MICROTRACE_MODE 값 오류: %q (local|edge|central 중 하나)", mode)
+	}
+}
+
+// runLocal — 기존 단일 호스트 개발/검증 모드.
+//
+// agent/resource_agent subprocess를 직접 실행하고, 같은 프로세스의 stats/hub/store로 연결한다.
+func runLocal(ctx context.Context) {
+	log.Println("[main] 실행 모드: local")
+
+	var agentProvider agent.EventProvider = agent.NewSubprocessProvider(agentBinary)
+	eventCh, err := agentProvider.Start(ctx)
+	if err != nil {
+		log.Fatalf("[main] agent 시작 실패: %v", err)
+	}
+
+	var resCh <-chan model.ResourceSnapshot
+	var resProvider resource.ResourceProvider = resource.NewSubprocessProvider(resourceAgentBinary)
+	if ch, err := resProvider.Start(ctx); err != nil {
+		log.Printf("[main] resource_agent 시작 실패 (자원 수집 비활성화): %v", err)
+	} else {
+		resCh = ch
+	}
+
+	startCollector(ctx, eventCh, resCh, buildResolver(ctx))
+}
+
+// runEdge — EC2 워커 모드.
+//
+// 로컬 agent/resource_agent에서 읽은 telemetry를 central collector로 gRPC 전송한다.
+// stats/hub/store는 실행하지 않는다.
+func runEdge(ctx context.Context) {
+	addr := strings.TrimSpace(os.Getenv("MICROTRACE_CENTRAL_ADDR"))
+	if addr == "" {
+		log.Fatalf("[main] MICROTRACE_MODE=edge requires MICROTRACE_CENTRAL_ADDR")
+	}
+	log.Printf("[main] 실행 모드: edge -> %s", addr)
+
+	client, err := remote.NewClient(addr)
+	if err != nil {
+		log.Fatalf("[main] central collector 클라이언트 생성 실패: %v", err)
+	}
+	defer client.Close()
+
+	var agentProvider agent.EventProvider = agent.NewSubprocessProvider(agentBinary)
+	eventCh, err := agentProvider.Start(ctx)
+	if err != nil {
+		log.Fatalf("[main] agent 시작 실패: %v", err)
+	}
+
+	go func() {
+		if err := client.SendEvents(ctx, eventCh); err != nil && ctx.Err() == nil {
+			log.Printf("[main] event gRPC 전송 실패: %v", err)
+		}
+	}()
+
+	var resProvider resource.ResourceProvider = resource.NewSubprocessProvider(resourceAgentBinary)
+	if resCh, err := resProvider.Start(ctx); err != nil {
+		log.Printf("[main] resource_agent 시작 실패 (자원 전송 비활성화): %v", err)
+	} else {
+		go func() {
+			if err := client.SendResources(ctx, resCh); err != nil && ctx.Err() == nil {
+				log.Printf("[main] resource gRPC 전송 실패: %v", err)
+			}
+		}()
+	}
+
+	<-ctx.Done()
+	log.Println("[main] 종료 신호 수신, edge 종료")
+}
+
+// runCentral — EC2 중앙 collector 모드.
+//
+// gRPC로 받은 telemetry를 기존 stats/hub/store 파이프라인에 주입한다.
+func runCentral(ctx context.Context) {
+	addr := strings.TrimSpace(os.Getenv("MICROTRACE_GRPC_ADDR"))
+	if addr == "" {
+		addr = grpcListenAddr
+	}
+	log.Printf("[main] 실행 모드: central (gRPC %s)", addr)
+
+	remoteServer := remote.NewServer()
+	if err := remoteServer.Start(ctx, addr); err != nil {
+		log.Fatalf("[main] gRPC telemetry 서버 시작 실패: %v", err)
+	}
+
+	startCollector(ctx, remoteServer.Events(), remoteServer.Resources(), buildResolver(ctx))
+}
+
+// startCollector — stats/hub/store/http를 조립한다.
+//
+// eventCh/resCh가 local subprocess에서 오든 central gRPC에서 오든 이후 파이프라인은 같다.
+func startCollector(ctx context.Context, eventCh <-chan model.Event, resCh <-chan model.ResourceSnapshot, svcResolver resolver.ServiceResolver) {
+	// ── Hub 시작 ────────────────────────────────────────────────────────
 	h := hub.New()
 	go h.Run()
 
-	// ── 3. Resolver 시작 ───────────────────────────────────────────────
-	svcResolver := buildResolver(ctx)
-
-	// ── 4. Store 시작 ──────────────────────────────────────────────────
+	// ── Store 시작 ──────────────────────────────────────────────────────
 	// SQLite 초기화 실패 시 경고만 내고 저장 없이 계속 진행한다.
 	var storeFn stats.StoreFn
 	db, err := store.New(dbPath)
 	if err != nil {
 		log.Printf("[main] SQLite 초기화 실패 (저장 비활성화): %v", err)
 	} else {
-		defer db.Close()
 		done := make(chan struct{})
-		go db.Run(done)
-		defer close(done)
+		storeDone := make(chan struct{})
+		go func() {
+			db.Run(done)
+			close(storeDone)
+		}()
+		defer func() {
+			close(done)
+			<-storeDone
+			db.Close()
+		}()
 		storeFn = stats.StoreFn{
 			Conn:     db.WriteConn,
 			Resource: db.WriteResource,
@@ -74,7 +186,7 @@ func main() {
 		log.Printf("[main] SQLite 저장 활성화: %s", dbPath)
 	}
 
-	// ── 5. Processor 시작 ──────────────────────────────────────────────
+	// ── Processor 시작 ─────────────────────────────────────────────────
 	// hub.Broadcast를 함수 포인터로 넘긴다.
 	// stats 패키지가 hub/store 패키지를 직접 임포트하지 않아도 된다.
 	proc := stats.New(svcResolver, func(msg model.OutboundMsg) {
@@ -83,25 +195,13 @@ func main() {
 
 	h.SetHistoryFn(proc.GetHistory)
 
-	// ── 6. Agent Reader 시작 ───────────────────────────────────────────
-	var agentProvider agent.EventProvider = agent.NewSubprocessProvider(agentBinary)
-	eventCh, err := agentProvider.Start(ctx)
-	if err != nil {
-		log.Fatalf("[main] agent 시작 실패: %v", err)
-	}
 	go proc.Run(eventCh)
 
-	// ── 6b. Resource Agent 시작 ────────────────────────────────────────
-	// resource_agent 바이너리가 없으면 경고만 내고 계속 진행한다.
-	// 자원 수집 없이도 latency 추적은 정상 동작해야 한다.
-	var resProvider resource.ResourceProvider = resource.NewSubprocessProvider(resourceAgentBinary)
-	if resCh, resErr := resProvider.Start(ctx); resErr != nil {
-		log.Printf("[main] resource_agent 시작 실패 (자원 수집 비활성화): %v", resErr)
-	} else {
+	if resCh != nil {
 		proc.ForwardResource(resCh)
 	}
 
-	// ── 7. HTTP 서버 ───────────────────────────────────────────────────
+	// ── HTTP 서버 ───────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.ServeWs)
 	mux.HandleFunc("/api/history", makeHistoryHandler(db))
@@ -117,7 +217,7 @@ func main() {
 		}
 	}()
 
-	// ── 8. 종료 대기 ───────────────────────────────────────────────────
+	// ── 종료 대기 ───────────────────────────────────────────────────────
 	<-ctx.Done()
 	log.Println("[main] 종료 신호 수신, graceful shutdown 시작")
 	srv.Shutdown(context.Background())
