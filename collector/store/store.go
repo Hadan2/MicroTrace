@@ -27,12 +27,21 @@ const (
 	retentionDays = 7
 )
 
+// bufferedConn — 버퍼에 담긴 StatSnapshot + 그 스냅샷이 만들어진 시각.
+// StatSnapshot 자체엔 타임스탬프 필드가 없어(WebSocket/프론트 전파를 피하려 추가하지 않음),
+// WriteConn 시점의 시각을 store 내부에서만 함께 들고 있는다.
+// 이렇게 해야 flush가 배치 전체를 한 시각으로 뭉개지 않고 각 스냅샷의 실제 시각을 보존한다.
+type bufferedConn struct {
+	snap  model.StatSnapshot
+	tsMs  int64
+}
+
 // Store — SQLite 배치 저장소
 type Store struct {
 	db *sql.DB
 
 	mu        sync.Mutex
-	connBuf   []model.StatSnapshot
+	connBuf   []bufferedConn
 	resBuf    []model.ResourceSnapshot
 }
 
@@ -53,7 +62,7 @@ func New(path string) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{db: db, connBuf: make([]model.StatSnapshot, 0, 120), resBuf: make([]model.ResourceSnapshot, 0, 120)}, nil
+	return &Store{db: db, connBuf: make([]bufferedConn, 0, 120), resBuf: make([]model.ResourceSnapshot, 0, 120)}, nil
 }
 
 // migrate — 테이블과 인덱스를 생성한다. 이미 존재하면 무시한다.
@@ -91,9 +100,12 @@ func migrate(db *sql.DB) error {
 }
 
 // WriteConn — StatSnapshot을 버퍼에 추가한다. 즉시 반환.
+// 담는 시각(now)을 함께 기록해 flush가 이 스냅샷의 실제 발생 시각을 보존하게 한다.
+// (stats가 1초마다 생성해 즉시 넘기므로 WriteConn 시점 ≈ 스냅샷 발생 시점.)
 func (s *Store) WriteConn(snap model.StatSnapshot) {
+	now := time.Now().UnixMilli()
 	s.mu.Lock()
-	s.connBuf = append(s.connBuf, snap)
+	s.connBuf = append(s.connBuf, bufferedConn{snap: snap, tsMs: now})
 	s.mu.Unlock()
 }
 
@@ -144,7 +156,9 @@ func (s *Store) flush() {
 	}
 	defer tx.Rollback()
 
-	now := time.Now().UnixMilli()
+	// 배치 전체를 한 시각(now)으로 저장하면 60초치가 같은 ts로 뭉쳐 x축이 붕괴한다.
+	// conn은 WriteConn 시점에 기록한 tsMs를, resource는 스냅샷의 TimestampMs를 각 행마다 쓴다.
+	fallback := time.Now().UnixMilli() // TimestampMs가 비어있는 방어용 보정값
 
 	connStmt, err := tx.Prepare(`
 		INSERT INTO conn_stats
@@ -159,12 +173,16 @@ func (s *Store) flush() {
 
 	for _, c := range conns {
 		spike := 0
-		if c.IsSpike {
+		if c.snap.IsSpike {
 			spike = 1
 		}
-		if _, err := connStmt.Exec(now, c.SrcService, c.DstService,
-			c.P50Us, c.P95Us, c.P99Us, c.AvgUs, c.JitterUs,
-			c.RetransmitCount, spike, c.CauseKind, c.CauseSignal,
+		ts := c.tsMs
+		if ts == 0 {
+			ts = fallback
+		}
+		if _, err := connStmt.Exec(ts, c.snap.SrcService, c.snap.DstService,
+			c.snap.P50Us, c.snap.P95Us, c.snap.P99Us, c.snap.AvgUs, c.snap.JitterUs,
+			c.snap.RetransmitCount, spike, c.snap.CauseKind, c.snap.CauseSignal,
 		); err != nil {
 			log.Printf("[store] conn_stats insert 실패: %v", err)
 		}
@@ -182,7 +200,11 @@ func (s *Store) flush() {
 	defer resStmt.Close()
 
 	for _, r := range ress {
-		if _, err := resStmt.Exec(now, r.ServiceName,
+		ts := r.TimestampMs
+		if ts == 0 {
+			ts = fallback
+		}
+		if _, err := resStmt.Exec(ts, r.ServiceName,
 			r.CPUPct, r.CPUThrottlePct, r.MemCurrentBytes,
 			r.MemPressurePct, r.IOWaitPct, r.OOMKillCount,
 		); err != nil {
